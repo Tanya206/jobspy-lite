@@ -223,9 +223,10 @@ export default function Dashboard({ onGoJobs }) {
                 />
               </label>
               <label className="inline">
-                location
+                locations (comma-sep)
                 <input
                   className="input" type="text"
+                  title="One city per comma — each is scraped separately, in order."
                   defaultValue={settings.scrape_params.location ?? ''}
                   onBlur={(e) => {
                     const v = e.target.value.trim()
@@ -286,7 +287,9 @@ export default function Dashboard({ onGoJobs }) {
                   full descriptions
                 </label>
               </div>
-              <p className="muted small">Changes apply from the next run.</p>
+              <p className="muted small">
+                Changes apply from the next run. Comma-separated locations are scraped one city at a time.
+              </p>
             </>
           ) : (
             <Spinner label="Loading settings…" />

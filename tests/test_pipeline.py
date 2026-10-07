@@ -163,7 +163,7 @@ def test_failed_scoring_is_recorded_and_retried(temp_db, monkeypatch):
         def __init__(self, config):
             pass
 
-        def scrape(self):
+        def scrape(self, progress_callback=None):
             return [{
                 "title": "Retry Me", "company": "Acme", "site": "linkedin",
                 "job_url": "https://example.com/retry", "description": "d",
@@ -236,7 +236,7 @@ class SingleJobScraper:
     def __init__(self, config):
         pass
 
-    def scrape(self):
+    def scrape(self, progress_callback=None):
         return [
             {
                 "title": "Principal Engineer",
@@ -419,7 +419,7 @@ def test_run_pipeline_end_to_end_with_fakes(temp_db, monkeypatch):
         def __init__(self, config):
             pass
 
-        def scrape(self):
+        def scrape(self, progress_callback=None):
             return [
                 {
                     "title": "AI Engineer",
@@ -477,3 +477,58 @@ def test_run_pipeline_end_to_end_with_fakes(temp_db, monkeypatch):
     run_row = storage.get_run(summary["run_id"])
     assert run_row["status"] == "completed"
     assert run_row["scored"] == 2
+
+
+def test_run_pipeline_reports_per_city_scrape_progress(temp_db, monkeypatch):
+    """A comma-separated location surfaces one progress message per city and
+    keeps the scrape inside the 0–10% band of the run."""
+    _seed_context()
+
+    class ProgressScraper:
+        def __init__(self, config):
+            self.config = config
+
+        def scrape(self, progress_callback=None):
+            cities = ["Hyderabad", "Bengaluru"]
+            for i, city in enumerate(cities):
+                progress_callback(
+                    i, len(cities),
+                    f"Scraping 'AI Engineer' in {city} ({i + 1}/{len(cities)})",
+                )
+                progress_callback(
+                    i + 1, len(cities),
+                    f"Found 1 jobs for 'AI Engineer' in {city}",
+                )
+            return [
+                {
+                    "title": "AI Engineer",
+                    "company": "Acme",
+                    "location": "Hyderabad",
+                    "site": "linkedin",
+                    "job_url": "https://example.com/1",
+                    "description": "Build AI things",
+                }
+            ]
+
+    import app.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "JobScraper", ProgressScraper)
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: FakeAgent())
+    monkeypatch.setattr(pipeline_module.notify, "notify_above_threshold", lambda *a, **k: 0)
+
+    seen = []
+    summary = run_pipeline(
+        trigger="manual",
+        progress_callback=lambda message, percent: seen.append((message, percent)),
+    )
+
+    assert summary["status"] == "completed"
+    messages = [msg for msg, _ in seen]
+    assert "Scraping 'AI Engineer' in Hyderabad (1/2)" in messages
+    assert "Scraping 'AI Engineer' in Bengaluru (2/2)" in messages
+
+    scrape_percents = [pct for msg, pct in seen if msg.startswith(("Scraping '", "Found "))]
+    assert scrape_percents and max(scrape_percents) <= 10
+    assert min(scrape_percents) >= 0
+    # The run keeps moving past the scrape band (persist/score/export).
+    assert any(pct is not None and pct > 10 for _, pct in seen)

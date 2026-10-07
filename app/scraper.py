@@ -1,7 +1,8 @@
 """Job scraper using jobsniffer, trimmed from the original JobSpy scraper.
 
 Exposes a low-level ``scrape_jobs_from_sites`` plus a config-driven
-``JobScraper`` class that iterates one search term at a time, deduplicates,
+``JobScraper`` class that iterates one (location, search term) pair at a
+time — so a comma-separated location runs each city separately — deduplicates,
 and can save its results as JSON.
 """
 
@@ -87,27 +88,47 @@ def _load_project_config() -> Dict[str, Any]:
     return module.load_config()
 
 
+def parse_locations(raw: Any) -> List[str]:
+    """Split a location setting into the list of locations to scrape.
+
+    ``"Hyderabad, Bengaluru"`` → ``["Hyderabad", "Bengaluru"]``. Each part
+    must be scraped separately: job boards geocode the whole string to a
+    *single* city, so passing "Hyderabad, Bengaluru" as one location silently
+    returns one city's jobs and drops the other. A blank/missing value means
+    "no location filter" and yields ``[""]``.
+    """
+    if raw is None:
+        return [""]
+    locations = [part.strip() for part in str(raw).split(",")]
+    return [part for part in locations if part] or [""]
+
+
 class JobScraper:
     """Config-driven job scraper.
 
     Reads settings from the root ``config.py`` (or an override dict), scrapes
-    every configured search term across every configured site, and yields one
-    batch per term via :meth:`scrape_iter` so callers can stream progress.
+    every configured location × search term combination across every
+    configured site — one pair at a time, in order — and yields one batch per
+    pair via :meth:`scrape_iter` so callers can stream progress.
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config if config is not None else _load_project_config()
 
     def scrape_iter(self, progress_callback=None) -> Iterator[Dict[str, Any]]:
-        """Yield scraped jobs one search term at a time.
+        """Yield scraped jobs one (location, search term) pair at a time.
 
-        Each yield is ``{"term", "index", "total", "jobs": [...], "error"}``.
+        A comma-separated ``location`` setting (e.g. ``"Hyderabad,
+        Bengaluru"``) is scraped city by city: all search terms for the first
+        location, then the next, and so on — never in parallel, and never as
+        one comma-joined query. Each yield is
+        ``{"term", "location", "index", "total", "jobs": [...], "error"}``.
         Deduplication is left to the caller. Cooldown sleeps happen between
-        terms (never after the last one).
+        pairs (never after the last one).
         """
         sites = self.config.get("sites", [])
         search_terms = self.config.get("search_terms", [])
-        location = self.config.get("location", "")
+        locations = parse_locations(self.config.get("location", ""))
         cooldown_minutes = self.config.get("scrape_cooldown_minutes", 0)
         proxies = self.config.get("proxies") or None
 
@@ -121,15 +142,24 @@ class JobScraper:
             "is_remote": self.config.get("is_remote", False),
         }
 
-        total = len(search_terms)
+        # One work item per (location, term); locations loop outside so each
+        # city finishes before the next one starts.
+        work = [(location, term) for location in locations for term in search_terms]
+        total = len(work)
 
         def _report(completed: int, message: str) -> None:
             if progress_callback is not None:
                 progress_callback(completed, total, message)
 
-        for index, term in enumerate(search_terms):
-            _report(index, f"Scraping '{term}' ({index + 1}/{total})")
-            logger.info("Scraping '%s' across %s", term, sites)
+        for index, (location, term) in enumerate(work):
+            where = f" in {location}" if location else ""
+            _report(index, f"Scraping '{term}'{where} ({index + 1}/{total})")
+            logger.info(
+                "Scraping '%s' in %s across %s",
+                term,
+                location or "any location",
+                sites,
+            )
             jobs: List[Dict[str, Any]] = []
             error: Optional[str] = None
             try:
@@ -142,18 +172,21 @@ class JobScraper:
                 )
                 if df is not None and not df.empty:
                     jobs = df.to_dict("records")
-                    logger.info("Retrieved %d jobs for '%s'", len(jobs), term)
-                    _report(index + 1, f"Found {len(jobs)} jobs for '{term}'")
+                    logger.info(
+                        "Retrieved %d jobs for '%s'%s", len(jobs), term, where
+                    )
+                    _report(index + 1, f"Found {len(jobs)} jobs for '{term}'{where}")
                 else:
-                    logger.warning("No jobs returned for '%s'", term)
-                    _report(index + 1, f"No jobs for '{term}'")
-            except Exception as exc:  # noqa: BLE001 - log and continue other terms
+                    logger.warning("No jobs returned for '%s'%s", term, where)
+                    _report(index + 1, f"No jobs for '{term}'{where}")
+            except Exception as exc:  # noqa: BLE001 - log and continue other pairs
                 error = str(exc)
-                logger.error("Error scraping '%s': %s", term, exc, exc_info=True)
-                _report(index + 1, f"Error on '{term}'")
+                logger.error("Error scraping '%s'%s: %s", term, where, exc, exc_info=True)
+                _report(index + 1, f"Error on '{term}'{where}")
 
             yield {
                 "term": term,
+                "location": location,
                 "index": index,
                 "total": total,
                 "jobs": jobs,
@@ -164,7 +197,11 @@ class JobScraper:
                 cooldown_sleep(cooldown_minutes, logger)
 
     def scrape(self, progress_callback=None) -> List[Dict[str, Any]]:
-        """Scrape all configured terms/sites and return deduplicated jobs."""
+        """Scrape all configured locations × terms × sites, deduplicated.
+
+        Dedup runs across the whole set, so a posting that shows up in two
+        cities' scrapes is stored once.
+        """
         total_scraped = 0
         collected: List[Dict[str, Any]] = []
         for event in self.scrape_iter(progress_callback=progress_callback):

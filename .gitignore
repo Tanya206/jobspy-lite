@@ -23,6 +23,8 @@ frontend/.env.local
 .vscode/
 .idea/
 .DS_Store
+.freebuff/
+logs.txt
 
 # Terraform state + local vars (state can contain secrets; never commit)
 infra/.terraform/

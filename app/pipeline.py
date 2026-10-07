@@ -98,9 +98,9 @@ class PipelineContext:
         self.resume_hash: str = resume.get("hash", "")
 
 
-def _scrape(context: PipelineContext) -> List[Dict[str, Any]]:
+def _scrape(context: PipelineContext, progress_callback=None) -> List[Dict[str, Any]]:
     scraper = JobScraper(dict(context.scrape_params))
-    jobs = scraper.scrape()
+    jobs = scraper.scrape(progress_callback=progress_callback)
     return [make_json_safe(job) for job in jobs]
 
 
@@ -280,7 +280,14 @@ def _execute_pipeline(
 
         # ---- 1. Scrape -------------------------------------------------- #
         _report("Scraping job boards…", 0)
-        scraped = _scrape(context)
+
+        # Stream the scraper's per-(location, term) messages so a
+        # comma-separated location shows "Scraping 'x' in Hyderabad (1/4)"
+        # instead of a silent multi-city crawl. Scrape owns 0–10% of the bar.
+        def _scrape_progress(completed: int, total: int, message: str) -> None:
+            _report(message, (completed / total) * 10 if total else 0)
+
+        scraped = _scrape(context, progress_callback=_scrape_progress)
 
         # ---- 2. Persist raw + detect new + pick up AI retries ----------- #
         _report(f"Persisting {len(scraped)} scraped postings…", 10)
