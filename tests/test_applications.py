@@ -109,6 +109,26 @@ def test_list_backfills_an_already_accepted_job_once(client):
     assert second[0]["notes"] == "edited"
 
 
+def test_deleted_accepted_job_stays_gone_until_accepted_again(client):
+    from app import storage
+
+    key = _job(storage, url="https://example.com/jobs/gone")
+    client.post(f"/jobs/{key}/status", json={"new_status": "accepted"})
+    app_id = client.get("/applications").json()["applications"][0]["id"]
+
+    assert client.delete(f"/applications/{app_id}").status_code == 200
+    assert client.get("/applications").json()["applications"] == []
+    assert client.get("/applications").json()["applications"] == []
+
+    again = client.post(f"/jobs/{key}/status", json={"new_status": "accepted"})
+    assert again.status_code == 200
+    rows = client.get("/applications").json()["applications"]
+    assert len(rows) == 1
+    assert rows[0]["id"] != app_id
+    assert rows[0]["job_key"] == key
+    assert rows[0]["status"] == "Not Applied"
+
+
 def test_create_update_and_delete(client):
     created = client.post("/applications", json={})
     assert created.status_code == 201

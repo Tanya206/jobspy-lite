@@ -102,6 +102,13 @@ CREATE TABLE IF NOT EXISTS applications (
     notes        TEXT NOT NULL DEFAULT '',
     date_added   TEXT NOT NULL
 );
+
+-- A deleted tracker row for an accepted job must not be recreated on the
+-- next list. Accepting that job again clears this and inserts a new row.
+CREATE TABLE IF NOT EXISTS application_dismissals (
+    job_key      TEXT PRIMARY KEY,
+    dismissed_at TEXT NOT NULL
+);
 """
 
 
@@ -815,7 +822,11 @@ def _insert_application(conn: sqlite3.Connection, fields: Dict[str, Any]) -> Dic
 
 
 def list_applications() -> List[Dict[str, Any]]:
-    """Tracker rows, newest first. Accepted jobs missing a row are inserted."""
+    """Tracker rows, newest first.
+
+    Accepted jobs that have never had a tracker row are inserted. A row the
+    user deleted stays deleted until that job is accepted again.
+    """
     backfill_accepted_applications()
     rows = query(
         "SELECT * FROM applications ORDER BY date_added DESC, id DESC"
@@ -860,7 +871,23 @@ def update_application(app_id: str, patch: Dict[str, Any]) -> Optional[Dict[str,
 
 
 def delete_application(app_id: str) -> bool:
+    """Delete a tracker row. An accepted job's key is remembered so list does not recreate it."""
     with transaction() as conn:
+        row = conn.execute(
+            "SELECT job_key FROM applications WHERE id = ?", (app_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        job_key = row["job_key"]
+        if job_key:
+            conn.execute(
+                """
+                INSERT INTO application_dismissals (job_key, dismissed_at)
+                VALUES (?, ?)
+                ON CONFLICT(job_key) DO UPDATE SET dismissed_at = excluded.dismissed_at
+                """,
+                (job_key, _utc_now()),
+            )
         cursor = conn.execute("DELETE FROM applications WHERE id = ?", (app_id,))
         return cursor.rowcount > 0
 
@@ -870,10 +897,12 @@ def ensure_application_for_job(job: Dict[str, Any]) -> Dict[str, Any]:
 
     A repeat accept, or a row already edited on the Applications page, is
     returned unchanged. A hand-added or imported row with the same link and
-    no job key is claimed instead of duplicated.
+    no job key is claimed instead of duplicated. Calling this after a delete
+    (an explicit accept) clears the dismissal and inserts a fresh row.
     """
     key = job["job_key"]
     with transaction() as conn:
+        conn.execute("DELETE FROM application_dismissals WHERE job_key = ?", (key,))
         existing = conn.execute(
             "SELECT * FROM applications WHERE job_key = ?", (key,)
         ).fetchone()
@@ -906,8 +935,21 @@ def ensure_application_for_job(job: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def backfill_accepted_applications() -> int:
-    """Insert tracker rows for jobs already marked accepted. Returns new rows."""
-    jobs = query("SELECT * FROM jobs WHERE status = 'accepted'")
+    """Insert tracker rows for accepted jobs the user has not deleted.
+
+    Returns the number of new rows. Dismissed job keys are left alone so a
+    reload does not bring a deleted application back.
+    """
+    jobs = query(
+        """
+        SELECT jobs.* FROM jobs
+        WHERE status = 'accepted'
+          AND NOT EXISTS (
+              SELECT 1 FROM application_dismissals AS dismissed
+              WHERE dismissed.job_key = jobs.job_key
+          )
+        """
+    )
     created = 0
     for job in jobs:
         before = query_one(

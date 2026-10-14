@@ -48,16 +48,33 @@ export function applicationStats(apps, now = Date.now()) {
   }
 }
 
+function text(value) {
+  if (value == null) return ''
+  return String(value)
+}
+
+function field(app, ...keys) {
+  if (app == null) return ''
+  for (const key of keys) {
+    if (app[key] != null && app[key] !== '') return text(app[key])
+  }
+  return ''
+}
+
 /** Short referral note. Blank company yields a blank message. */
 export function generateReferralMessage(app) {
-  if (!String(app.company || '').trim()) return ''
+  const company = field(app, 'company').trim()
+  if (!company) return ''
+  const role = field(app, 'jobRole', 'job_role')
+  const jobId = field(app, 'jobId', 'job_id')
+  const link = field(app, 'link')
   const nl = '\n'
   let msg =
     `Hi ,${nl}` +
-    `Hope you're doing well! I'm a GenAI Specialist at Infosys, building production agentic systems with LangGraph and FastAPI. I saw the ${app.jobRole || ''} opening at ${app.company} and think my background could be a strong fit — would you be open to referring me before I apply?${nl}${nl}`
-  if (String(app.jobId || '').trim()) msg += `Job ID: ${app.jobId}${nl}`
-  if (String(app.link || '').trim()) msg += `Job Link : ${app.link}${nl}${nl}`
-  else if (String(app.jobId || '').trim()) msg += nl
+    `Hope you're doing well! I'm a GenAI Specialist at Infosys, building production agentic systems with LangGraph and FastAPI. I saw the ${role} opening at ${company} and think my background could be a strong fit — would you be open to referring me before I apply?${nl}${nl}`
+  if (jobId.trim()) msg += `Job ID: ${jobId}${nl}`
+  if (link.trim()) msg += `Job Link : ${link}${nl}${nl}`
+  else if (jobId.trim()) msg += nl
   msg +=
     `I've attached my resume for context. No worries at all if you're not able to — really appreciate you considering it.${nl}` +
     `Thanks,${nl}` +
@@ -67,21 +84,24 @@ export function generateReferralMessage(app) {
 
 /** Longer email (subject + body), distinct from the short referral note. */
 export function generateEmailMessage(app) {
-  if (!String(app.company || '').trim()) return { subject: '', body: '' }
-  const role = String(app.jobRole || '').trim() || 'open role'
-  const subject = `Referral request — ${role} at ${app.company}`
+  const company = field(app, 'company').trim()
+  if (!company) return { subject: '', body: '' }
+  const role = field(app, 'jobRole', 'job_role').trim() || 'open role'
+  const jobId = field(app, 'jobId', 'job_id')
+  const link = field(app, 'link')
+  const subject = `Referral request — ${role} at ${company}`
   const lines = [
     'Hi,',
     '',
     "I hope this email finds you well. My name is Rohil, and I'm a GenAI Specialist at Infosys focused on production agentic systems with LangGraph and FastAPI.",
     '',
-    `I'm writing because I came across the ${role} position at ${app.company} and believe my background would be a strong fit. Would you be open to referring me for this role before I submit my application?`,
+    `I'm writing because I came across the ${role} position at ${company} and believe my background would be a strong fit. Would you be open to referring me for this role before I submit my application?`,
     '',
   ]
-  if (String(app.jobId || '').trim() || String(app.link || '').trim()) {
+  if (jobId.trim() || link.trim()) {
     lines.push('Role details:')
-    if (String(app.jobId || '').trim()) lines.push(`• Job ID: ${app.jobId}`)
-    if (String(app.link || '').trim()) lines.push(`• Job Link: ${app.link}`)
+    if (jobId.trim()) lines.push(`• Job ID: ${jobId}`)
+    if (link.trim()) lines.push(`• Job Link: ${link}`)
     lines.push('')
   }
   lines.push(
@@ -94,8 +114,10 @@ export function generateEmailMessage(app) {
 }
 
 export function formatEmailForClipboard(email) {
-  if (!email.subject && !email.body) return ''
-  return `Subject: ${email.subject}\n\n${email.body}`
+  const subject = text(email && email.subject).trim()
+  const body = text(email && email.body)
+  if (!subject && !body.trim()) return ''
+  return `Subject: ${subject}\n\n${body}`
 }
 
 function csvEscape(value) {

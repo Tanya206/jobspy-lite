@@ -88,10 +88,12 @@ export default function ApplicationsView() {
     }
   }
 
-  async function copyText(key, text) {
-    if (!text) return
+  async function copyText(key, value) {
+    const text = String(value ?? '')
+    if (!text.trim()) return
+    setError(null)
     try {
-      await navigator.clipboard.writeText(text)
+      await writeClipboard(text)
       setCopied(key)
       window.setTimeout(() => setCopied((current) => (current === key ? '' : current)), 1500)
     } catch (err) {
@@ -207,6 +209,28 @@ function Stat({ label, value, accent = false }) {
       <div className="stat-card__label">{label}</div>
     </div>
   )
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(text)
+      return
+    } catch {
+      // Permission or a non-secure page. Fall through to the textarea copy.
+    }
+  }
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.left = '-9999px'
+  document.body.appendChild(area)
+  area.select()
+  const ok = document.execCommand('copy')
+  document.body.removeChild(area)
+  if (!ok) throw new Error('Could not copy')
+  return Promise.resolve()
 }
 
 function ApplicationRow({ app, overdue, copied, onSave, onCopy, onDelete }) {
