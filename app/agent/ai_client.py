@@ -19,7 +19,7 @@ from .rate_limiter import NVIDIA_RATE_LIMITER
 
 logger = logging.getLogger(__name__)
 
-MAX_PARSE_ATTEMPTS = 4
+MAX_PARSE_ATTEMPTS = 10
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 120
 
