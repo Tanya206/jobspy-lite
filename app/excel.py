@@ -1,6 +1,7 @@
 """Excel export: the jobs table rendered into a formatted ``.xlsx`` workbook."""
 
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -99,7 +100,11 @@ def write_excel(jobs: List[Dict[str, Any]], output_path: Any = None) -> Path:
 
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
-    workbook.save(path)
+    # Write aside, then replace, so a crash mid-save cannot truncate the
+    # workbook readers already have.
+    tmp = path.with_name(path.name + ".tmp")
+    workbook.save(tmp)
+    os.replace(tmp, path)
     logger.info("Wrote %d jobs to %s", len(jobs), path)
     return path
 

@@ -83,6 +83,37 @@ def test_jobs_listing_and_stats(client):
     assert stats["total"] == 2
     assert stats["accepted"] == 1
     assert stats["new"] == 1
+    assert stats["rejected"] == 0
+    assert stats["auto_rejected"] == 0
+    assert stats["manual_rejected"] == 0
+
+
+def test_rejected_filter_split_and_filtered_total(client):
+    """/jobs separates manual from pipeline rejects and reports the filtered
+    total so badges stay accurate when only one page is loaded."""
+    from app import storage
+
+    auto_key = storage.upsert_job({"job_url": "https://x/auto", "title": "A"})
+    manual_key = storage.upsert_job({"job_url": "https://x/manual", "title": "B"})
+    storage.set_job_status(auto_key, "rejected", auto=True)
+    storage.set_job_status(manual_key, "rejected")
+
+    manual = client.get("/jobs?status=rejected&auto_rejected=false").json()
+    assert manual["filtered_total"] == 1
+    assert [j["job_key"] for j in manual["jobs"]] == [manual_key]
+
+    auto = client.get("/jobs?status=rejected&auto_rejected=true").json()
+    assert auto["filtered_total"] == 1
+    assert [j["job_key"] for j in auto["jobs"]] == [auto_key]
+
+    all_rejected = client.get("/jobs?status=rejected").json()
+    assert all_rejected["filtered_total"] == 2
+    assert {j["job_key"] for j in all_rejected["jobs"]} == {auto_key, manual_key}
+
+    stats = client.get("/stats").json()
+    assert stats["rejected"] == 2
+    assert stats["auto_rejected"] == 1
+    assert stats["manual_rejected"] == 1
 
 
 def test_scheduler_config_validation(client):
@@ -117,13 +148,19 @@ def test_scheduler_toggle_starts_and_stops(client):
 def test_settings_roundtrip(client):
     updated = client.post(
         "/settings",
-        json={"score_threshold": 65, "experience_min_years": 1, "experience_max_years": 3},
+        json={"score_threshold": 65, "experience_min_years": 1, "experience_max_years": 3,
+              "retention_days": 45},
     )
     assert updated.status_code == 200
     body = updated.json()
     assert body["score_threshold"] == 65
     assert body["experience_min_years"] == 1
     assert body["experience_max_years"] == 3
+    assert body["retention_days"] == 45
+
+    # 0 (keep everything) is a valid explicit value; negatives clamp to 0.
+    assert client.post("/settings", json={"retention_days": 0}).json()["retention_days"] == 0
+    assert client.post("/settings", json={"retention_days": -5}).json()["retention_days"] == 0
 
 
 def test_agent_params_roundtrip_and_sanitization(client):
@@ -188,3 +225,51 @@ def test_runs_listed(client):
     runs = client.get("/runs").json()["runs"]
     assert len(runs) == 1
     assert runs[0]["trigger"] == "manual"
+
+
+def test_api_token_required_when_set(client, monkeypatch):
+    monkeypatch.setenv("JOBSPY_API_TOKEN", "secret-token")
+    assert client.get("/health").status_code == 200
+    assert client.get("/stats").status_code == 401
+    ok = client.get("/stats", headers={"X-API-Token": "secret-token"})
+    assert ok.status_code == 200
+
+
+def test_settings_clamp_results_and_workers(client):
+    updated = client.post(
+        "/settings",
+        json={
+            "scrape_params": {"results_wanted": 9000, "hours_old": 0},
+            "agent_params": {"max_workers": 40, "ai_model": "m"},
+        },
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["scrape_params"]["results_wanted"] == 200
+    assert body["scrape_params"]["hours_old"] == 1
+    assert body["agent_params"]["max_workers"] == 8
+
+
+def test_purge_endpoint(client):
+    from datetime import datetime, timedelta, timezone
+
+    from app import storage
+
+    old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    kept = storage.upsert_job({"job_url": "https://x/keep", "title": "accepted"})
+    storage.set_job_status(kept, "accepted")
+    gone = storage.upsert_job({"job_url": "https://x/gone", "title": "stale"})
+    storage.query("UPDATE jobs SET first_seen_at = ? WHERE job_key = ?", (old, kept))
+    storage.query("UPDATE jobs SET first_seen_at = ? WHERE job_key = ?", (old, gone))
+    run_id = storage.create_run("manual")
+    storage.query("UPDATE runs SET started_at = ? WHERE run_id = ?", (old, run_id))
+
+    assert client.post("/maintenance/purge", json={"older_than_days": 0}).status_code == 400
+    response = client.post("/maintenance/purge", json={"older_than_days": 30})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["jobs_deleted"] == 1
+    assert body["runs_deleted"] == 1
+    assert storage.get_job(kept) is not None
+    assert storage.get_job(gone) is None
+    assert storage.get_run(run_id) is None

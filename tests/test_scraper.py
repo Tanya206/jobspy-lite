@@ -130,7 +130,7 @@ def test_scrape_dedupes_a_posting_seen_in_two_cities(monkeypatch):
 
     jobs = JobScraper(
         _config(search_terms=["AI Engineer"], location="Hyderabad, Bengaluru")
-    ).scrape()
+    ).scrape().jobs
     assert len(jobs) == 1
 
     # Distinct postings from different cities both survive.
@@ -151,7 +151,7 @@ def test_scrape_dedupes_a_posting_seen_in_two_cities(monkeypatch):
     monkeypatch.setattr("app.scraper.scrape_jobs_from_sites", fake_distinct)
     jobs = JobScraper(
         _config(search_terms=["AI Engineer"], location="Hyderabad, Bengaluru")
-    ).scrape()
+    ).scrape().jobs
     assert [job["location"] for job in jobs] == ["Hyderabad", "Bengaluru"]
 
 
@@ -178,5 +178,5 @@ def test_scrape_forwards_the_progress_callback(monkeypatch):
         context, progress_callback=lambda done, total, msg: reported.append((done, total, msg))
     )
 
-    assert result == []
+    assert result.jobs == []
     assert reported == [(1, 2, "Scraping 'AI Engineer' in Hyderabad (1/2)")]

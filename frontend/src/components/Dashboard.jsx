@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   exportUrl, getResumeInfo, getRunLatest, getScheduler, getSettings,
-  getStats, saveSchedulerConfig, saveSettings, startRun, testNotify,
+  getStats, purgeOlderThan, saveSchedulerConfig, saveSettings, startRun, testNotify,
   toggleScheduler, uploadResume,
 } from '../api.js'
 import { formatIst } from '../datetime.js'
@@ -28,6 +28,8 @@ export default function Dashboard({ onGoJobs }) {
   const [showSchedForm, setShowSchedForm] = useState(false)
   const [schedForm, setSchedForm] = useState(null)
   const [notifyMsg, setNotifyMsg] = useState('')
+  const [purgeDays, setPurgeDays] = useState(30)
+  const [purgeMsg, setPurgeMsg] = useState('')
   const fileRef = useRef(null)
 
   async function refreshAll() {
@@ -76,6 +78,30 @@ export default function Dashboard({ onGoJobs }) {
     setError(null)
     try {
       await startRun(force)
+    } catch (e) {
+      setError(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function onPurge() {
+    const days = parseInt(purgeDays, 10)
+    if (!Number.isFinite(days) || days < 1) {
+      setPurgeMsg('Enter at least 1 day.')
+      return
+    }
+    const ok = window.confirm(
+      `Delete jobs and run history older than ${days} days? Accepted jobs are kept.`,
+    )
+    if (!ok) return
+    setBusy(true)
+    setError(null)
+    setPurgeMsg('')
+    try {
+      const result = await purgeOlderThan(days)
+      setPurgeMsg(`Deleted ${result.jobs_deleted} job(s) and ${result.runs_deleted} run(s).`)
+      await refreshAll()
     } catch (e) {
       setError(e)
     } finally {
@@ -147,7 +173,8 @@ export default function Dashboard({ onGoJobs }) {
         <StatCard label="total jobs" value={stats?.total} />
         <StatCard label="new" value={stats?.new} accent />
         <StatCard label="accepted" value={stats?.accepted} />
-        <StatCard label="rejected" value={stats?.rejected} />
+        <StatCard label="rejected (manual)" value={stats?.manual_rejected} />
+        <StatCard label="auto-rejected" value={stats?.auto_rejected} />
         <StatCard label="avg score" value={stats?.avg_score} />
       </div>
 
@@ -403,7 +430,38 @@ export default function Dashboard({ onGoJobs }) {
                   }}
                 />
               </label>
-              <p className="muted small">Blank max = open-ended. Changes apply from the next run.</p>
+              <label className="inline">
+                auto-delete after (days)
+                <input
+                  className="input input--num"
+                  type="number" min="0"
+                  defaultValue={settings.retention_days ?? 0}
+                  title="Delete postings not seen in this many days at the end of each run. 0 = keep everything."
+                  onBlur={(e) => {
+                    const v = parseInt(e.target.value, 10)
+                    if (!Number.isNaN(v) && v >= 0 && v !== settings.retention_days) onSaveSettings({ retention_days: v })
+                  }}
+                />
+              </label>
+              <label className="inline">
+                delete data older than (days)
+                <input
+                  className="input input--num"
+                  type="number" min="1"
+                  value={purgeDays}
+                  onChange={(e) => setPurgeDays(e.target.value)}
+                  title="Delete jobs first seen more than this many days ago, and run history of the same age. Accepted jobs are kept."
+                />
+              </label>
+              <button className="btn" type="button" onClick={onPurge} disabled={busy}>
+                Delete old data
+              </button>
+              <p className="muted small">
+                Blank max = open-ended; auto-delete 0 = keep everything. Changes apply from the next run — the
+                pipeline deletes postings not seen for that many days (including auto-rejected ones).
+                Delete old data runs immediately and keeps accepted jobs.
+              </p>
+              {purgeMsg ? <p className="small">{purgeMsg}</p> : null}
             </>
           ) : (
             <Spinner label="Loading settings…" />
@@ -440,6 +498,7 @@ export default function Dashboard({ onGoJobs }) {
             {typeof run.summary.jobs_scraped === 'number' ? ` · ${run.summary.jobs_scraped} scraped` : ''}
             {typeof run.summary.scored === 'number' ? ` · ${run.summary.scored} scored` : ''}
             {typeof run.summary.alerts_sent === 'number' ? ` · ${run.summary.alerts_sent} alerts` : ''}
+            {typeof run.summary.pruned === 'number' && run.summary.pruned ? ` · ${run.summary.pruned} old postings deleted` : ''}
             {run.summary.error ? ` · ${run.summary.error}` : ''}
           </p>
         ) : null}

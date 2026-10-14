@@ -44,11 +44,11 @@ export default function RunsView() {
           </thead>
           <tbody>
             {runs.map((run) => (
-              <tr key={run.run_id} className={run.status === 'failed' ? 'runs-table__row--bad' : ''}>
+              <tr key={run.run_id} className={run.status === 'failed' || run.status === 'degraded' ? 'runs-table__row--bad' : ''}>
                 <td>{formatIst(run.started_at)}</td>
                 <td><span className="badge">{run.trigger}</span></td>
                 <td>
-                  <span className={`badge ${run.status === 'completed' ? 'badge--ok' : run.status === 'failed' ? 'badge--no' : ''}`}>
+                  <span className={`badge ${run.status === 'completed' ? 'badge--ok' : run.status === 'failed' ? 'badge--no' : run.status === 'degraded' ? 'badge--warn' : ''}`}>
                     {run.status}
                   </span>
                 </td>
@@ -59,7 +59,11 @@ export default function RunsView() {
                 <td>{secondsBetween(run.started_at, run.finished_at)
                   ? `${secondsBetween(run.started_at, run.finished_at)}s`
                   : '—'}</td>
-                <td className="runs-table__error">{run.error || ''}</td>
+                <td className="runs-table__error">
+                  {run.error || (Array.isArray(run.scrape_errors) && run.scrape_errors.length
+                    ? run.scrape_errors.join('; ')
+                    : '')}
+                </td>
               </tr>
             ))}
           </tbody>

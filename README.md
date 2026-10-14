@@ -104,6 +104,24 @@ A job is alerted when ALL of: `score >= threshold`, `experience_match`,
 run so nothing is sent twice. Use the Dashboard's "Test Telegram alert" to
 flush pending matches manually.
 
+### Rejected vs auto-rejected
+
+Jobs whose required experience falls outside your window are auto-rejected
+(`auto_rejected = 1`) so they never alert again. They appear in the board's
+Rejected section with an "auto · outside experience window" label, and they
+are still counted separately in the `auto-rejected` metric on the Overview.
+A manual accept/reject always wins and clears the auto mark.
+
+### Retention
+
+Set "auto-delete after (days)" in the Screening panel (or `retention_days` via
+`/settings`; `0` = keep everything). At the end of each run the pipeline
+deletes postings that have not been seen by the scraper for that many days —
+live listings keep being re-seen, so they are never aged out. The number
+deleted appears in the run summary. "Delete old data" on the same panel
+runs immediately: it removes jobs first seen more than N days ago (accepted
+jobs are kept) and run-history rows of the same age.
+
 ## API overview
 
 | Method | Path | Purpose |
@@ -111,19 +129,20 @@ flush pending matches manually.
 | GET | /health | liveness + component status (scheduler, resume, telegram, db) |
 | POST | /resume | upload a .docx resume (stored once, used by all runs) |
 | GET | /resume | current resume metadata |
-| GET | /jobs | list jobs (`status=new/accepted/rejected`, `order=score/recent/title`) |
+| GET | /jobs | list jobs (`status=new/accepted/rejected`, `auto_rejected=true/false`, `order=score/recent/title`) |
 | GET | /jobs/{key} | one job, full detail |
 | POST | /jobs/{key}/status | `{"new_status": "accepted"\|"rejected"\|"new"}` |
-| GET | /stats | counts by status + average score |
+| GET | /stats | counts by status (incl. `manual_rejected`/`auto_rejected` split) + average score |
 | POST | /run | start a manual pipeline run (background) |
 | GET | /run/latest | progress + last summary |
 | GET | /runs | run history |
 | GET | /scheduler | status + config |
 | POST | /scheduler/config | update interval/cron config (live) |
 | POST | /scheduler/toggle | start/stop the scheduler |
-| GET/POST | /settings | scrape params, experience window, score threshold |
+| GET/POST | /settings | scrape params, experience window, score threshold, retention days |
 | GET | /export.xlsx | download the Excel export |
 | POST | /notify/test | send any pending above-threshold alerts now |
+| POST | /maintenance/purge | delete jobs and run history older than `older_than_days` (accepted jobs kept) |
 
 ## Configuration
 

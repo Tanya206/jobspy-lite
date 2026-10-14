@@ -1,5 +1,5 @@
 # JobSpy Lite runtime dependencies
-jobsniffer @ git+https://github.com/rohil01/JobSpy
+jobsniffer @ git+https://github.com/rohil01/JobSpy@fc3c3cd81f7eca513d249bf6cc5612e9a19cd480
 pandas>=1.5.0
 pyyaml>=6.0
 python-dotenv>=1.0.0

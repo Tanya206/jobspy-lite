@@ -18,6 +18,7 @@ export default defineConfig({
       '/health': 'http://127.0.0.1:8000',
       '/export.xlsx': 'http://127.0.0.1:8000',
       '/notify': 'http://127.0.0.1:8000',
+      '/maintenance': 'http://127.0.0.1:8000',
     },
   },
 })
