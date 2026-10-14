@@ -53,7 +53,6 @@ from .schemas import (
 )
 
 MAX_RESUME_BYTES = 2 * 1024 * 1024
-_LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +90,12 @@ def _presented_token(request: Request) -> str:
 
 @app.middleware("http")
 async def require_api_token(request: Request, call_next):
-    """Require JOBSPY_API_TOKEN except on /health and the static dashboard.
+    """Require JOBSPY_API_TOKEN only when that env var is set.
 
-    When the token is unset, loopback clients (and the pytest TestClient)
-    stay open. Any other host is refused so a published port cannot spend
-    the NVIDIA key or read the stored resume.
+    Unset means the API is open, which is how the Oracle Cloud deploy is
+    used: the dashboard is opened from a browser on the public IP, and no
+    token is shared. /health, the SPA, and /assets stay open either way so
+    the page and the Docker healthcheck can load.
     """
     path = request.url.path
     if (
@@ -106,19 +106,12 @@ async def require_api_token(request: Request, call_next):
     ):
         return await call_next(request)
     expected = os.environ.get("JOBSPY_API_TOKEN", "").strip()
-    if expected:
-        presented = _presented_token(request)
-        if len(presented) == len(expected) and secrets.compare_digest(presented, expected):
-            return await call_next(request)
-        return _unauthorized("Unauthorized")
-    host = request.client.host if request.client else ""
-    if host in _LOCAL_HOSTS:
+    if not expected:
         return await call_next(request)
-    logger.warning(
-        "Refusing %s %s from %s: JOBSPY_API_TOKEN is unset.",
-        request.method, path, host or "unknown",
-    )
-    return _unauthorized("API token is not configured.")
+    presented = _presented_token(request)
+    if len(presented) == len(expected) and secrets.compare_digest(presented, expected):
+        return await call_next(request)
+    return _unauthorized("Unauthorized")
 
 
 def _unauthorized(detail: str) -> JSONResponse:
