@@ -10,6 +10,7 @@ export default defineConfig({
     proxy: {
       '/resume': 'http://127.0.0.1:8000',
       '/jobs': 'http://127.0.0.1:8000',
+      '/applications': 'http://127.0.0.1:8000',
       '/stats': 'http://127.0.0.1:8000',
       '/run': 'http://127.0.0.1:8000',
       '/runs': 'http://127.0.0.1:8000',

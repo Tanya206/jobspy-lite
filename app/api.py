@@ -9,7 +9,12 @@ POST /resume                upload a .docx resume (stored for all runs)
 GET  /resume                current resume metadata
 GET  /jobs                  list jobs (status filter, auto/manual reject filter, order, pagination)
 GET  /jobs/{key}            one job with full details
-POST /jobs/{key}/status     accept/reject/reset a job
+POST /jobs/{key}/status     accept/reject/reset a job (accept also fills Applications)
+GET  /applications          tracker rows (backfills jobs already accepted)
+POST /applications          add a tracker row by hand
+POST /applications/import   replace the tracker list
+PATCH /applications/{id}    edit a tracker row
+DELETE /applications/{id}   delete a tracker row
 GET  /stats                 counts by status (incl. manual vs auto rejected) + average score
 GET  /runs                  run history (newest first)
 POST /run                   start a manual pipeline run (background)
@@ -41,6 +46,9 @@ from .agent.resume_io import extract_text
 from .config import EXCEL_PATH, PROJECT_ROOT, clamp_int
 from .pipeline import PipelineContext, request_shutdown, run_pipeline, wait_for_idle
 from .schemas import (
+    ApplicationImport,
+    ApplicationPatch,
+    ApplicationWrite,
     HealthResponse,
     JobListResponse,
     JobStatusIn,
@@ -244,7 +252,55 @@ def set_job_status_endpoint(job_key: str, payload: JobStatusIn) -> Dict[str, Any
         raise HTTPException(status_code=400, detail=str(exc))
     if not updated:
         raise HTTPException(status_code=404, detail=f"Unknown job '{job_key}'.")
+    if payload.new_status == "accepted":
+        job = storage.get_job(job_key)
+        if job is not None:
+            storage.ensure_application_for_job(job)
     return {"job_key": job_key, "status": payload.new_status}
+
+
+@app.get("/applications")
+def list_applications() -> Dict[str, Any]:
+    return {"applications": storage.list_applications()}
+
+
+@app.post("/applications", status_code=201)
+def create_application(payload: ApplicationWrite) -> Dict[str, Any]:
+    try:
+        return storage.create_application(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/applications/import")
+def import_applications(payload: ApplicationImport) -> Dict[str, Any]:
+    try:
+        rows = storage.replace_applications(
+            [item.model_dump() for item in payload.applications]
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"applications": rows}
+
+
+@app.patch("/applications/{app_id}")
+def update_application(app_id: str, payload: ApplicationPatch) -> Dict[str, Any]:
+    try:
+        updated = storage.update_application(
+            app_id, payload.model_dump(exclude_unset=True)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Unknown application '{app_id}'.")
+    return updated
+
+
+@app.delete("/applications/{app_id}")
+def delete_application(app_id: str) -> Dict[str, Any]:
+    if not storage.delete_application(app_id):
+        raise HTTPException(status_code=404, detail=f"Unknown application '{app_id}'.")
+    return {"id": app_id, "deleted": True}
 
 
 @app.get("/stats", response_model=StatsResponse)

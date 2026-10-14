@@ -51,6 +51,18 @@ async function getJSON(path) {
   return res.json()
 }
 
+async function sendJSON(path, method, body) {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(body ?? {}),
+  })
+  if (res.status === 401) onUnauthorized?.()
+  if (!res.ok) throw await readError(res)
+  if (res.status === 204) return null
+  return res.json()
+}
+
 async function postJSON(path, body) {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
@@ -76,6 +88,14 @@ export const getJobs = ({ status, order = 'score', limit = 200, offset = 0, auto
 export const getJob = (key) => getJSON(`/jobs/${encodeURIComponent(key)}`)
 export const setJobStatus = (key, status) =>
   postJSON(`/jobs/${encodeURIComponent(key)}/status`, { new_status: status })
+export const getApplications = () => getJSON('/applications')
+export const createApplication = (body) => postJSON('/applications', body)
+export const updateApplication = (id, patch) =>
+  sendJSON(`/applications/${encodeURIComponent(id)}`, 'PATCH', patch)
+export const deleteApplication = (id) =>
+  sendJSON(`/applications/${encodeURIComponent(id)}`, 'DELETE')
+export const importApplications = (applications) =>
+  postJSON('/applications/import', { applications })
 export const getRuns = (limit = 50) => getJSON(`/runs?limit=${limit}`)
 export const startRun = (forceRescore = false) =>
   postJSON(`/run?force_rescore=${forceRescore}`)

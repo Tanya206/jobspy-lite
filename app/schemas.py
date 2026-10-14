@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class HealthResponse(BaseModel):
@@ -75,3 +75,41 @@ class JobStatusIn(BaseModel):
 
 class PurgeIn(BaseModel):
     older_than_days: int
+
+
+class ApplicationWrite(BaseModel):
+    """A tracker row. CamelCase aliases match the spreadsheet the UI edits."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    company: str = ""
+    job_role: str = Field("", alias="jobRole")
+    job_id: str = Field("", alias="jobId")
+    link: str = ""
+    referral: str = ""
+    status: str = "Not Applied"
+    date_applied: str = Field("", alias="dateApplied")
+    notes: str = ""
+
+
+class ApplicationPatch(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    company: Optional[str] = None
+    job_role: Optional[str] = Field(None, alias="jobRole")
+    job_id: Optional[str] = Field(None, alias="jobId")
+    link: Optional[str] = None
+    referral: Optional[str] = None
+    status: Optional[str] = None
+    date_applied: Optional[str] = Field(None, alias="dateApplied")
+    notes: Optional[str] = None
+
+
+class ApplicationImportItem(ApplicationWrite):
+    id: Optional[str] = None
+    job_key: Optional[str] = Field(None, alias="jobKey")
+    date_added: Optional[str] = Field(None, alias="dateAdded")
+
+
+class ApplicationImport(BaseModel):
+    applications: List[ApplicationImportItem]
