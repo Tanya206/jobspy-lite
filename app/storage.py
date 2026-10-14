@@ -1,15 +1,17 @@
 """SQLite persistence layer for JobSpy Lite.
 
-Three tables, all created idempotently:
+Four tables, all created idempotently:
 
-- ``jobs``     — one row per unique posting (keyed by the stable job identity).
-                 Screening annotations are upserted; user state (``status``,
-                 ``notified``) is never clobbered by re-scrapes.
-- ``runs``     — one row per pipeline execution (cron or manual), for history
-                 and for verifying the scheduler actually fired.
-- ``settings`` — JSON-key/value store for runtime-editable configuration
-                 (threshold, experience window, scrape params, cron config,
-                 the stored resume).
+- ``jobs``         — one row per unique posting (keyed by the stable job identity).
+                     Screening annotations are upserted; user state (``status``,
+                     ``notified``) is never clobbered by re-scrapes.
+- ``runs``         — one row per pipeline execution (cron or manual), for history
+                     and for verifying the scheduler actually fired.
+- ``settings``     — JSON-key/value store for runtime-editable configuration
+                     (threshold, experience window, scrape params, cron config,
+                     the stored resume).
+- ``applications`` — spreadsheet rows for the Applications tab. Accepting a job
+                     inserts one row; later edits are not overwritten.
 
 WAL mode is enabled for safe concurrent reads while the pipeline writes.
 """
@@ -85,6 +87,20 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS applications (
+    id           TEXT PRIMARY KEY,
+    job_key      TEXT UNIQUE,
+    company      TEXT NOT NULL DEFAULT '',
+    job_role     TEXT NOT NULL DEFAULT '',
+    job_id       TEXT NOT NULL DEFAULT '',
+    link         TEXT NOT NULL DEFAULT '',
+    referral     TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'Not Applied',
+    date_applied TEXT NOT NULL DEFAULT '',
+    notes        TEXT NOT NULL DEFAULT '',
+    date_added   TEXT NOT NULL
 );
 """
 
@@ -445,7 +461,16 @@ def set_job_status(
             sql += " AND status = ?"
             params.append(only_if_status)
         cursor = conn.execute(sql, tuple(params))
-        return cursor.rowcount > 0
+        if cursor.rowcount > 0:
+            return True
+        # SQLite can report zero changes when the new values match the row.
+        # A repeat Accept must still succeed so the tracker insert can run.
+        exists_sql = "SELECT 1 FROM jobs WHERE job_key = ?"
+        exists_params: list = [job_key_value]
+        if only_if_status is not None:
+            exists_sql += " AND status = ?"
+            exists_params.append(only_if_status)
+        return conn.execute(exists_sql, tuple(exists_params)).fetchone() is not None
 
 
 def delete_jobs_older_than(days: int) -> int:
@@ -666,6 +691,274 @@ def purge_older_than(days: int) -> Dict[str, int]:
             (cutoff,),
         )
         return {"jobs_deleted": jobs.rowcount, "runs_deleted": runs.rowcount}
+
+
+# --------------------------------------------------------------------------- #
+# Applications (the in-app tracker)
+# --------------------------------------------------------------------------- #
+APPLICATION_STATUSES = {
+    "",
+    "Wishlist",
+    "Not Applied",
+    "Applied",
+    "Interview",
+    "Offer",
+    "Rejected",
+}
+APPLICATION_REFERRALS = {"", "Yes", "No"}
+
+_APPLICATION_COLUMNS = (
+    "company",
+    "job_role",
+    "job_id",
+    "link",
+    "referral",
+    "status",
+    "date_applied",
+    "notes",
+)
+
+
+def _application_public(row: Any) -> Dict[str, Any]:
+    data = row if isinstance(row, dict) else dict(row)
+    return {
+        "id": data["id"],
+        "job_key": data["job_key"],
+        "company": data["company"] or "",
+        "jobRole": data["job_role"] or "",
+        "jobId": data["job_id"] or "",
+        "link": data["link"] or "",
+        "referral": data["referral"] or "",
+        "status": data["status"] if data["status"] is not None else "",
+        "dateApplied": data["date_applied"] or "",
+        "notes": data["notes"] or "",
+        "dateAdded": data["date_added"],
+    }
+
+
+def _check_application_choices(fields: Dict[str, Any]) -> None:
+    status = fields.get("status")
+    if status is not None and status not in APPLICATION_STATUSES:
+        raise ValueError(f"Invalid status '{status}'.")
+    referral = fields.get("referral")
+    if referral is not None and referral not in APPLICATION_REFERRALS:
+        raise ValueError(f"Invalid referral '{referral}'.")
+
+
+def _score_note(score: Any) -> Optional[str]:
+    if score is None:
+        return None
+    try:
+        number = float(score)
+    except (TypeError, ValueError):
+        return f"score {score}"
+    if number.is_integer():
+        return f"score {int(number)}"
+    return f"score {number}"
+
+
+def _fields_from_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Map a scraped job onto a new tracker row. Used only on insert."""
+    company = (job.get("company") or "").strip() or "Unknown"
+    notes: List[str] = []
+    location = (job.get("location") or "").strip()
+    if location:
+        notes.append(location)
+    score = _score_note(job.get("score"))
+    if score:
+        notes.append(score)
+    verdict = (job.get("verdict") or "").strip()
+    if verdict:
+        notes.append(verdict)
+    return {
+        "job_key": job["job_key"],
+        "company": company,
+        "job_role": (job.get("title") or "").strip(),
+        "job_id": "",
+        "link": (job.get("job_url") or "").strip(),
+        "referral": "",
+        "status": "Not Applied",
+        "date_applied": "",
+        "notes": " · ".join(notes),
+    }
+
+
+def _insert_application(conn: sqlite3.Connection, fields: Dict[str, Any]) -> Dict[str, Any]:
+    _check_application_choices(fields)
+    app_id = (fields.get("id") or "").strip() or uuid.uuid4().hex
+    job_key = (fields.get("job_key") or "").strip() or None
+    status = fields["status"] if "status" in fields and fields["status"] is not None else "Not Applied"
+    date_added = (fields.get("date_added") or "").strip() or _utc_now()
+    conn.execute(
+        """
+        INSERT INTO applications (
+            id, job_key, company, job_role, job_id, link, referral,
+            status, date_applied, notes, date_added
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            app_id,
+            job_key,
+            fields.get("company") or "",
+            fields.get("job_role") or "",
+            fields.get("job_id") or "",
+            fields.get("link") or "",
+            fields.get("referral") or "",
+            status,
+            fields.get("date_applied") or "",
+            fields.get("notes") or "",
+            date_added,
+        ),
+    )
+    row = conn.execute("SELECT * FROM applications WHERE id = ?", (app_id,)).fetchone()
+    return _application_public(row)
+
+
+def list_applications() -> List[Dict[str, Any]]:
+    """Tracker rows, newest first. Accepted jobs missing a row are inserted."""
+    backfill_accepted_applications()
+    rows = query(
+        "SELECT * FROM applications ORDER BY date_added DESC, id DESC"
+    )
+    return [_application_public(row) for row in rows]
+
+
+def get_application(app_id: str) -> Optional[Dict[str, Any]]:
+    row = query_one("SELECT * FROM applications WHERE id = ?", (app_id,))
+    return _application_public(row) if row else None
+
+
+def create_application(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Insert one tracker row (a hand-typed blank row, or an accepted job)."""
+    with transaction() as conn:
+        return _insert_application(conn, fields)
+
+
+def update_application(app_id: str, patch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Apply a partial edit. Returns None when the id is unknown."""
+    _check_application_choices(patch)
+    assignments = []
+    params: List[Any] = []
+    for column in _APPLICATION_COLUMNS:
+        if column in patch:
+            assignments.append(f"{column} = ?")
+            params.append(patch[column] if patch[column] is not None else "")
+    if not assignments:
+        return get_application(app_id)
+    params.append(app_id)
+    with transaction() as conn:
+        cursor = conn.execute(
+            f"UPDATE applications SET {', '.join(assignments)} WHERE id = ?",
+            tuple(params),
+        )
+        if cursor.rowcount == 0 and conn.execute(
+            "SELECT 1 FROM applications WHERE id = ?", (app_id,)
+        ).fetchone() is None:
+            return None
+        row = conn.execute("SELECT * FROM applications WHERE id = ?", (app_id,)).fetchone()
+        return _application_public(row) if row else None
+
+
+def delete_application(app_id: str) -> bool:
+    with transaction() as conn:
+        cursor = conn.execute("DELETE FROM applications WHERE id = ?", (app_id,))
+        return cursor.rowcount > 0
+
+
+def ensure_application_for_job(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Insert a Not Applied row for this job when none is tracked yet.
+
+    A repeat accept, or a row already edited on the Applications page, is
+    returned unchanged. A hand-added or imported row with the same link and
+    no job key is claimed instead of duplicated.
+    """
+    key = job["job_key"]
+    with transaction() as conn:
+        existing = conn.execute(
+            "SELECT * FROM applications WHERE job_key = ?", (key,)
+        ).fetchone()
+        if existing:
+            return _application_public(existing)
+        link = (job.get("job_url") or "").strip()
+        if link:
+            by_link = conn.execute(
+                "SELECT * FROM applications WHERE link = ? AND job_key IS NULL",
+                (link,),
+            ).fetchone()
+            if by_link:
+                conn.execute(
+                    "UPDATE applications SET job_key = ? WHERE id = ? AND job_key IS NULL",
+                    (key, by_link["id"]),
+                )
+                row = conn.execute(
+                    "SELECT * FROM applications WHERE id = ?", (by_link["id"],)
+                ).fetchone()
+                return _application_public(row)
+        try:
+            return _insert_application(conn, _fields_from_job(job))
+        except sqlite3.IntegrityError:
+            row = conn.execute(
+                "SELECT * FROM applications WHERE job_key = ?", (key,)
+            ).fetchone()
+            if row is None:
+                raise
+            return _application_public(row)
+
+
+def backfill_accepted_applications() -> int:
+    """Insert tracker rows for jobs already marked accepted. Returns new rows."""
+    jobs = query("SELECT * FROM jobs WHERE status = 'accepted'")
+    created = 0
+    for job in jobs:
+        before = query_one(
+            "SELECT id FROM applications WHERE job_key = ?", (job["job_key"],)
+        )
+        ensure_application_for_job(job)
+        if before is None:
+            after = query_one(
+                "SELECT id FROM applications WHERE job_key = ?", (job["job_key"],)
+            )
+            if after is not None:
+                created += 1
+    return created
+
+
+def replace_applications(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Replace the tracker list. Links that match one job keep that job key."""
+    with transaction() as conn:
+        conn.execute("DELETE FROM applications")
+        used_ids = set()
+        used_keys = set()
+        for item in items:
+            app_id = (item.get("id") or "").strip() or uuid.uuid4().hex
+            if app_id in used_ids:
+                app_id = uuid.uuid4().hex
+            used_ids.add(app_id)
+            link = (item.get("link") or "").strip()
+            job_key = (item.get("job_key") or "").strip() or None
+            if job_key is None and link:
+                matches = conn.execute(
+                    "SELECT job_key FROM jobs WHERE job_url = ?", (link,)
+                ).fetchall()
+                if len(matches) == 1:
+                    job_key = matches[0]["job_key"]
+            if job_key in used_keys:
+                job_key = None
+            elif job_key:
+                used_keys.add(job_key)
+            _insert_application(
+                conn,
+                {
+                    **item,
+                    "id": app_id,
+                    "job_key": job_key,
+                    "link": link,
+                },
+            )
+        rows = conn.execute(
+            "SELECT * FROM applications ORDER BY date_added DESC, id DESC"
+        ).fetchall()
+        return [_application_public(row) for row in rows]
 
 
 # --------------------------------------------------------------------------- #
