@@ -9,8 +9,9 @@ and can save its results as JSON.
 import importlib.util
 import json
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 import pandas as pd
 
@@ -25,6 +26,22 @@ except ImportError:
 from .util import cooldown_sleep, deduplicate_jobs, make_json_safe
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ScrapeResult:
+    """Jobs collected from one scrape, plus per-pair failures.
+
+    ``pair_count`` is the number of (location, term) scrapes attempted.
+    ``failed_pairs`` is how many of those raised. ``streamed`` is true when
+    the caller persisted each successful pair via ``on_batch`` as it arrived.
+    """
+
+    jobs: List[Dict[str, Any]]
+    errors: List[str] = field(default_factory=list)
+    pair_count: int = 0
+    failed_pairs: int = 0
+    streamed: bool = False
 
 
 def scrape_jobs_from_sites(
@@ -196,21 +213,53 @@ class JobScraper:
             if cooldown_minutes and index < total - 1:
                 cooldown_sleep(cooldown_minutes, logger)
 
-    def scrape(self, progress_callback=None) -> List[Dict[str, Any]]:
+    def scrape(
+        self,
+        progress_callback=None,
+        on_batch: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
+    ) -> ScrapeResult:
         """Scrape all configured locations × terms × sites, deduplicated.
 
         Dedup runs across the whole set, so a posting that shows up in two
-        cities' scrapes is stored once.
+        cities' scrapes is stored once. ``on_batch`` is called with each
+        successful pair's jobs before the next cooldown sleep, so a caller
+        can persist them before the rest of the scrape finishes. ``errors``
+        lists every pair that raised, as ``"<term> in <location>: <message>"``.
         """
         total_scraped = 0
         collected: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        pair_count = 0
+        failed_pairs = 0
         for event in self.scrape_iter(progress_callback=progress_callback):
-            total_scraped += len(event["jobs"])
-            collected.extend(event["jobs"])
+            pair_count += 1
+            if event.get("error"):
+                failed_pairs += 1
+                where = f" in {event['location']}" if event.get("location") else ""
+                errors.append(f"{event.get('term') or '?'}{where}: {event['error']}")
+            else:
+                batch = event.get("jobs") or []
+                total_scraped += len(batch)
+                if on_batch is not None and batch:
+                    on_batch(batch)
+                collected.extend(batch)
+            if should_stop is not None and should_stop():
+                logger.info("Stopping scrape early after %d pair(s).", pair_count)
+                break
 
         unique_jobs = deduplicate_jobs(collected)
-        logger.info("%d jobs scraped -> %d after dedup", total_scraped, len(unique_jobs))
-        return unique_jobs
+        logger.info(
+            "%d jobs scraped -> %d after dedup (%d/%d pairs failed)",
+            total_scraped, len(unique_jobs), failed_pairs, pair_count,
+        )
+        return ScrapeResult(
+            jobs=unique_jobs,
+            errors=errors,
+            pair_count=pair_count,
+            failed_pairs=failed_pairs,
+            streamed=on_batch is not None,
+        )
 
     def scrape_and_save(
         self, output_path: Optional[Union[str, Path]] = None, progress_callback=None
@@ -218,7 +267,7 @@ class JobScraper:
         """Scrape jobs and write them to ``output_path`` (or data/scraped_jobs.json)."""
         from .config import DATA_DIR
 
-        jobs = self.scrape(progress_callback=progress_callback)
+        jobs = self.scrape(progress_callback=progress_callback).jobs
         path = (
             Path(output_path)
             if output_path

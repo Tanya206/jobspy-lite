@@ -176,9 +176,10 @@ def test_failed_scoring_is_recorded_and_retried(temp_db, monkeypatch):
         pipeline_module.notify, "notify_above_threshold", lambda *a, **k: 0
     )
 
-    # Run 1: agent fails -> run completes, job recorded as failed, no fake verdict
+    # Run 1: agent fails -> run is degraded (scores were attempted), job recorded
+    # as failed, no fake verdict.
     s1 = run_pipeline(trigger="manual")
-    assert s1["status"] == "completed"
+    assert s1["status"] == "degraded"
     job = storage.get_job("https://example.com/retry")
     assert job["score_attempts"] == 1
     assert "NVIDIA down" in job["score_error"]
@@ -288,6 +289,7 @@ def test_experience_mismatch_is_auto_rejected(temp_db, monkeypatch):
     assert summary["auto_rejected"] == 1
     job = storage.get_job("https://example.com/senior")
     assert job["status"] == "rejected"
+    assert job["auto_rejected"] == 1  # flagged so the board can label it as automatic
     assert job["verdict"] == "outside experience window"
     assert job["required_years_min"] == 6
     assert agent.suitability_calls == 0  # no resume-fit call wasted on it
@@ -338,7 +340,7 @@ def test_estimate_failure_is_never_auto_rejected(temp_db, monkeypatch):
 
     summary = run_pipeline(trigger="manual")
 
-    assert summary["status"] == "completed"
+    assert summary["status"] == "degraded"
     assert summary["auto_rejected"] == 0
     job = storage.get_job("https://example.com/down")
     assert job["status"] == "new"
@@ -402,13 +404,81 @@ def test_suitability_failure_is_recorded_and_retried(temp_db, monkeypatch):
 
     summary = run_pipeline(trigger="manual")
 
-    assert summary["status"] == "completed"
+    assert summary["status"] == "degraded"
     assert summary["auto_rejected"] == 0
     job = storage.get_job("https://example.com/fitfail")
     assert job["status"] == "new"
     assert "NVIDIA down" in (job["score_error"] or "")
     assert job["verdict"] is None and job["score"] is None
     assert job["score_attempts"] == 1
+
+
+def test_retention_prunes_unseen_jobs(temp_db, monkeypatch):
+    """With retention_days set, postings not seen in that many days are
+    deleted at the end of the run; recently seen ones survive."""
+    _seed_context()
+    _fake_notify(monkeypatch)
+
+    class NoJobScraper:
+        def __init__(self, config):
+            pass
+
+        def scrape(self, progress_callback=None):
+            return []
+
+    import app.pipeline as pipeline_module
+    monkeypatch.setattr(pipeline_module, "JobScraper", NoJobScraper)
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: FakeAgent())
+
+    storage.set_setting("retention_days", 30)
+    old_key = storage.upsert_job({"job_url": "https://example.com/old", "title": "old"})
+    fresh_key = storage.upsert_job({"job_url": "https://example.com/fresh", "title": "fresh"})
+    storage.query(
+        "UPDATE jobs SET last_seen_at = ? WHERE job_key = ?",
+        (
+            (datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),
+            old_key,
+        ),
+    )
+
+    summary = run_pipeline(trigger="manual")
+
+    assert summary["status"] == "completed"
+    assert summary["pruned"] == 1
+    assert storage.get_job(old_key) is None
+    assert storage.get_job(fresh_key) is not None
+
+
+def test_retention_disabled_keeps_everything(temp_db, monkeypatch):
+    """No retention_days setting (0) means nothing is ever deleted."""
+    _seed_context()
+    _fake_notify(monkeypatch)
+
+    class NoJobScraper:
+        def __init__(self, config):
+            pass
+
+        def scrape(self, progress_callback=None):
+            return []
+
+    import app.pipeline as pipeline_module
+    monkeypatch.setattr(pipeline_module, "JobScraper", NoJobScraper)
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: FakeAgent())
+
+    old_key = storage.upsert_job({"job_url": "https://example.com/old", "title": "old"})
+    storage.query(
+        "UPDATE jobs SET last_seen_at = ? WHERE job_key = ?",
+        (
+            (datetime.now(timezone.utc) - timedelta(days=400)).isoformat(),
+            old_key,
+        ),
+    )
+
+    summary = run_pipeline(trigger="manual")
+
+    assert summary["status"] == "completed"
+    assert summary["pruned"] == 0
+    assert storage.get_job(old_key) is not None
 
 
 def test_run_pipeline_end_to_end_with_fakes(temp_db, monkeypatch):
@@ -532,3 +602,101 @@ def test_run_pipeline_reports_per_city_scrape_progress(temp_db, monkeypatch):
     assert min(scrape_percents) >= 0
     # The run keeps moving past the scrape band (persist/score/export).
     assert any(pct is not None and pct > 10 for _, pct in seen)
+
+
+def test_every_scrape_pair_failing_fails_the_run(temp_db, monkeypatch):
+    """A blocked board must not look like an empty market."""
+    from app.scraper import ScrapeResult
+
+    _seed_context()
+    notified = {"n": 0}
+
+    class BlockedScraper:
+        def __init__(self, config):
+            pass
+
+        def scrape(self, progress_callback=None, on_batch=None, should_stop=None):
+            return ScrapeResult(
+                jobs=[],
+                errors=["AI Engineer in Hyderabad: blocked", "AI Engineer in Bengaluru: blocked"],
+                pair_count=2,
+                failed_pairs=2,
+                streamed=True,
+            )
+
+    import app.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "JobScraper", BlockedScraper)
+    monkeypatch.setattr(
+        pipeline_module.notify, "notify_above_threshold",
+        lambda *a, **k: notified.__setitem__("n", notified["n"] + 1),
+    )
+
+    summary = run_pipeline(trigger="manual")
+    assert summary["status"] == "failed"
+    assert "blocked" in summary["error"]
+    assert notified["n"] == 0
+    assert storage.get_run(summary["run_id"])["status"] == "failed"
+
+
+def test_partial_scrape_failure_is_degraded(temp_db, monkeypatch):
+    from app.scraper import ScrapeResult
+
+    _seed_context()
+
+    class PartialScraper:
+        def __init__(self, config):
+            pass
+
+        def scrape(self, progress_callback=None, on_batch=None, should_stop=None):
+            return ScrapeResult(
+                jobs=[{
+                    "title": "AI Engineer",
+                    "company": "Acme",
+                    "site": "linkedin",
+                    "job_url": "https://example.com/partial",
+                    "description": "d",
+                }],
+                errors=["AI Engineer in Hyderabad: blocked"],
+                pair_count=2,
+                failed_pairs=1,
+                streamed=False,
+            )
+
+    import app.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "JobScraper", PartialScraper)
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: FakeAgent())
+    monkeypatch.setattr(pipeline_module.notify, "notify_above_threshold", lambda *a, **k: 0)
+
+    summary = run_pipeline(trigger="manual")
+    assert summary["status"] == "degraded"
+    assert "blocked" in summary["error"]
+    assert storage.get_job("https://example.com/partial")["score"] == 85
+    assert "blocked" in (storage.get_run(summary["run_id"])["error"] or "")
+
+
+def test_excel_failure_after_scoring_is_degraded(temp_db, monkeypatch):
+    """A broken export must not throw away a score that was already saved."""
+    _seed_context()
+
+    import app.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "JobScraper", _one_job_scraper("https://example.com/scored"))
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: FakeAgent())
+    monkeypatch.setattr(pipeline_module.notify, "notify_above_threshold", lambda *a, **k: 0)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("app.excel.export_excel", boom)
+
+    summary = run_pipeline(trigger="manual")
+    assert summary["status"] == "degraded"
+    assert summary["scored"] == 1
+    assert "disk full" in summary["error"]
+    job = storage.get_job("https://example.com/scored")
+    assert job["score"] == 85
+    run = storage.get_run(summary["run_id"])
+    assert run["status"] == "degraded"
+    assert run["scored"] == 1

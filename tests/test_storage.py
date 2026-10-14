@@ -97,6 +97,60 @@ def test_counts_by_status(temp_db):
     assert counts["avg_score"] == 70.0
 
 
+def test_manual_vs_auto_reject_tracking(temp_db):
+    """Auto-rejects carry auto_rejected=1; a user's own reject never does, and
+    a later manual decision clears the auto mark."""
+    auto_key = storage.upsert_job(_job("auto"))
+    manual_key = storage.upsert_job(_job("manual"))
+
+    storage.set_job_status(auto_key, "rejected", only_if_status="new", auto=True)
+    storage.set_job_status(manual_key, "rejected")
+
+    assert storage.get_job(auto_key)["auto_rejected"] == 1
+    assert storage.get_job(manual_key)["auto_rejected"] == 0
+
+    # The filter separates them.
+    assert [j["job_key"] for j in storage.list_jobs(status="rejected", auto_rejected=True)] == [auto_key]
+    assert [j["job_key"] for j in storage.list_jobs(status="rejected", auto_rejected=False)] == [manual_key]
+    assert storage.count_jobs(status="rejected") == 2
+    assert storage.count_jobs(status="rejected", auto_rejected=False) == 1
+
+    # A manual accept clears the auto mark: the user is now in charge.
+    assert storage.set_job_status(auto_key, "accepted") is True
+    assert storage.get_job(auto_key)["auto_rejected"] == 0
+
+
+def test_counts_split_manual_and_auto_rejected(temp_db):
+    auto_key = storage.upsert_job(_job("auto"))
+    manual_key = storage.upsert_job(_job("manual"))
+    storage.set_job_status(auto_key, "rejected", auto=True)
+    storage.set_job_status(manual_key, "rejected")
+
+    counts = storage.counts_by_status()
+    assert counts["rejected"] == 2
+    assert counts["auto_rejected"] == 1
+    assert counts["manual_rejected"] == 1
+
+
+def test_delete_jobs_older_than(temp_db):
+    """Retention deletes rows not seen within the window; 0 disables it."""
+    from datetime import datetime, timedelta, timezone
+
+    old_key = storage.upsert_job(_job("old"))
+    fresh_key = storage.upsert_job(_job("fresh"))
+    storage.query(
+        "UPDATE jobs SET last_seen_at = ? WHERE job_key = ?",
+        ((datetime.now(timezone.utc) - timedelta(days=40)).isoformat(), old_key),
+    )
+
+    assert storage.delete_jobs_older_than(0) == 0  # disabled
+    assert storage.get_job(old_key) is not None
+
+    assert storage.delete_jobs_older_than(30) == 1
+    assert storage.get_job(old_key) is None
+    assert storage.get_job(fresh_key) is not None
+
+
 def test_invalid_status_raises(temp_db):
     key = storage.upsert_job(_job())
     with pytest.raises(ValueError):

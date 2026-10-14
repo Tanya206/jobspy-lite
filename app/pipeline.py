@@ -6,16 +6,18 @@ Sequence (each run, cron or manual):
   3. Score only what needs scoring:
      - new jobs, or rows with no score yet, or rows whose stored resume hash
        predates the current resume (resume changed since scoring), or rows
-       last scored more than RESCORE_AFTER_HOURS ago, or ``force_rescore``.
-  4. Persist annotations (required years, experience match, score, skills);
+       last scored more than RESCORE_AFTER_HOURS ago, or ``force_rescore``.    4. Persist annotations (required years, experience match, score, skills);
      user status/notified are preserved by storage.upsert_job. Jobs whose
      required experience is outside the window are auto-rejected (status
-     ``rejected``) unless the user already triaged them.
-  5. Export the jobs table to Excel and send Telegram alerts for
+     ``rejected``) unless the user already triaged them; auto-rejects are
+     flagged so the UI separates them from the user's own rejects.
+  5. Prune postings not seen for ``retention_days`` (settings, 0 = never),
+     export the jobs table to Excel and send Telegram alerts for
      above-threshold matches.
   6. Record everything on a ``runs`` row.
 """
 
+import inspect
 import logging
 import os
 import threading
@@ -26,7 +28,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import notify, storage
 from .agent.ai_job_agent import AIJobAgent
-from .scraper import JobScraper
+from .agent.observability import AI_METRICS
+from .config import clamp_int
+from .scraper import JobScraper, ScrapeResult
 from .util import make_json_safe
 
 logger = logging.getLogger(__name__)
@@ -40,6 +44,33 @@ RESCORE_AFTER_HOURS = int(os.environ.get("RESCORE_AFTER_HOURS", "72"))
 # also stops cron and manual runs from overlapping (duplicate scrapes + the
 # same new job scored twice).
 _PIPELINE_LOCK = threading.Lock()
+
+# Set on process shutdown. In-flight scoring finishes the current job, then
+# the pool stops taking new ones; retention, export, and notify still run.
+_SHUTDOWN = threading.Event()
+
+# Stop the rest of a run when the provider is clearly dead: the same
+# permanent status (401/403) three times, or five scoring failures in a row.
+PERMANENT_STATUSES = {401, 403}
+PERMANENT_STOP_AFTER = 3
+FAILURE_STREAK_STOP = 5
+
+
+def request_shutdown() -> None:
+    """Ask the in-flight pipeline to stop scoring and finish the tail."""
+    _SHUTDOWN.set()
+
+
+def shutdown_requested() -> bool:
+    return _SHUTDOWN.is_set()
+
+
+def wait_for_idle(timeout: float = 180) -> bool:
+    """Block until no pipeline run holds the lock, or ``timeout`` seconds."""
+    acquired = _PIPELINE_LOCK.acquire(timeout=timeout)
+    if acquired:
+        _PIPELINE_LOCK.release()
+    return acquired
 
 
 def _experience_matches(
@@ -75,7 +106,16 @@ class PipelineContext:
         # defaults (the dashboard edits them via POST /settings).
         stored_scrape = self.settings.get("scrape_params") or {}
         stored_agent = self.settings.get("agent_params") or {}
-        self.scrape_params: Dict[str, Any] = {**self.config, **stored_scrape}
+        merged_scrape: Dict[str, Any] = {**self.config, **stored_scrape}
+        if "results_wanted" in merged_scrape:
+            merged_scrape["results_wanted"] = clamp_int(
+                merged_scrape.get("results_wanted"), 1, 200, 15
+            )
+        if "hours_old" in merged_scrape:
+            merged_scrape["hours_old"] = clamp_int(
+                merged_scrape.get("hours_old"), 1, 168, 24
+            )
+        self.scrape_params = merged_scrape
         self.config = {**self.config, **stored_agent}
         self.experience_min: int = self.settings.get(
             "experience_min_years", self.config["experience_min_years"]
@@ -89,29 +129,82 @@ class PipelineContext:
         self.score_threshold: int = self.settings.get(
             "score_threshold", self.config.get("score_threshold", 70)
         )
+        # Retention: postings not seen for this many days are deleted at the
+        # end of each run (0 = keep everything).
+        try:
+            self.retention_days: int = max(0, int(self.settings.get("retention_days", 0) or 0))
+        except (TypeError, ValueError):
+            self.retention_days = 0
         # Runtime-editable AI knobs (dashboard → AI agent panel).
         self.ai_rate_limit_per_min: int = self.config.get("ai_rate_limit_per_min", 30)
-        self.max_workers: int = self.config.get("max_workers", 4)
+        self.max_workers: int = clamp_int(self.config.get("max_workers", 4), 1, 8, 4)
         self.force_rescore: bool = bool(self.settings.get("force_rescore", False))
         resume = self.settings.get("resume") or {}
         self.resume_text: str = resume.get("text", "")
         self.resume_hash: str = resume.get("hash", "")
 
 
-def _scrape(context: PipelineContext, progress_callback=None) -> List[Dict[str, Any]]:
+def _scrape(
+    context: PipelineContext,
+    progress_callback=None,
+    on_batch=None,
+    should_stop=None,
+) -> ScrapeResult:
+    """Run the scraper. Test doubles that return a bare list still work.
+
+    ``on_batch`` is forwarded only when the scraper accepts it, so a fake
+    ``scrape(self, progress_callback=None)`` is not broken. When it is
+    forwarded, each successful pair is persisted before the next cooldown.
+    """
     scraper = JobScraper(dict(context.scrape_params))
-    jobs = scraper.scrape(progress_callback=progress_callback)
-    return [make_json_safe(job) for job in jobs]
+    fn = scraper.scrape
+    kwargs: Dict[str, Any] = {"progress_callback": progress_callback}
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if on_batch is not None and "on_batch" in params:
+        kwargs["on_batch"] = on_batch
+    if should_stop is not None and "should_stop" in params:
+        kwargs["should_stop"] = should_stop
+    raw = fn(**kwargs)
+    if isinstance(raw, ScrapeResult):
+        raw.jobs = [make_json_safe(job) for job in raw.jobs]
+        return raw
+    jobs = list(raw or [])
+    return ScrapeResult(
+        jobs=[make_json_safe(job) for job in jobs],
+        errors=[],
+        pair_count=0,
+        failed_pairs=0,
+        streamed=False,
+    )
 
 
 class ScoreFailure(Exception):
-    """Both AI agents failed for one job after in-call retries."""
+    """An AI agent failed for one job after in-call retries."""
+
+    def __init__(self, message: str, *, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
+
+
+class ScoringSkipped(Exception):
+    """This job was not scored because the run is stopping early."""
+
+
+def _http_status(exc: BaseException) -> Optional[int]:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return status
+    return None
 
 
 def _screen_one(
     agent: AIJobAgent,
     job: Dict[str, Any],
     context: PipelineContext,
+    stop_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """Run both agents for one posting and return the annotated copy.
 
@@ -124,11 +217,15 @@ def _screen_one(
     fake verdicts ("outside experience window" / "unknown"), which used to
     permanently misclassify real postings.
     """
+    if shutdown_requested() or (stop_event is not None and stop_event.is_set()):
+        raise ScoringSkipped()
     required = None
     try:
         required = agent._estimate_required_years(job)
     except Exception as exc:
-        raise ScoreFailure(f"experience agent: {exc}") from exc
+        raise ScoreFailure(
+            f"experience agent: {exc}", status=_http_status(exc)
+        ) from exc
 
     matched = _experience_matches(
         required, context.experience_min, context.experience_max
@@ -140,7 +237,9 @@ def _screen_one(
         try:
             suitability = agent.assess_suitability(job, context.resume_text)
         except Exception as exc:
-            raise ScoreFailure(f"suitability agent: {exc}") from exc
+            raise ScoreFailure(
+                f"suitability agent: {exc}", status=_http_status(exc)
+            ) from exc
         annotated["score"] = suitability.get("score")
         annotated["final_score"] = suitability.get("final_score")
         annotated["verdict"] = suitability.get("verdict")
@@ -220,6 +319,7 @@ def run_pipeline(
             "new_jobs": 0,
             "scored": 0,
             "auto_rejected": 0,
+            "pruned": 0,
             "alerts_sent": 0,
             "duration_s": 0.0,
             "error": "Another pipeline run is already in progress.",
@@ -254,6 +354,7 @@ def _execute_pipeline(
         "new_jobs": 0,
         "scored": 0,
         "auto_rejected": 0,
+        "pruned": 0,
         "alerts_sent": 0,
         "duration_s": None,
         "error": None,
@@ -262,6 +363,27 @@ def _execute_pipeline(
     def _report(message: str, percent: Optional[float] = None) -> None:
         if progress_callback is not None:
             progress_callback(message, percent)
+
+    AI_METRICS.reset()
+
+    def _close(status: str) -> None:
+        metrics = AI_METRICS.snapshot()
+        summary["ai_metrics"] = metrics
+        summary["status"] = status
+        storage.finish_run(
+            run_id,
+            status,
+            jobs_scraped=summary.get("jobs_scraped") or 0,
+            new_jobs=summary.get("new_jobs") or 0,
+            scored=summary.get("scored") or 0,
+            alerts_sent=summary.get("alerts_sent") or 0,
+            error=summary.get("error"),
+            score_failed=summary.get("score_failed"),
+            auto_rejected=summary.get("auto_rejected"),
+            pruned=summary.get("pruned"),
+            scrape_errors=summary.get("scrape_errors") or None,
+            ai_metrics=metrics if metrics.get("calls") else None,
+        )
 
     try:
         # Close out runs left 'running' by a crash/earlier deploy.
@@ -272,13 +394,10 @@ def _execute_pipeline(
         if not context.resume_text:
             logger.warning("No resume stored — run aborted; upload a resume first.")
             summary["error"] = "No resume stored. Upload a resume before running."
-            storage.finish_run(
-                run_id, "failed", jobs_scraped=0, new_jobs=0, scored=0,
-                alerts_sent=0, error=summary["error"],
-            )
+            _close("failed")
             return summary
 
-        # ---- 1. Scrape -------------------------------------------------- #
+        # ---- 1+2. Scrape, persisting each pair before the next cooldown -- #
         _report("Scraping job boards…", 0)
 
         # Stream the scraper's per-(location, term) messages so a
@@ -287,32 +406,65 @@ def _execute_pipeline(
         def _scrape_progress(completed: int, total: int, message: str) -> None:
             _report(message, (completed / total) * 10 if total else 0)
 
-        scraped = _scrape(context, progress_callback=_scrape_progress)
-
-        # ---- 2. Persist raw + detect new + pick up AI retries ----------- #
-        _report(f"Persisting {len(scraped)} scraped postings…", 10)
         new_count = 0
         to_score: List[Tuple[str, Dict[str, Any]]] = []
+        seen_keys: set = set()
         retry_count = 0
-        for raw_job in scraped:
-            key = storage.upsert_job(raw_job)
-            existing = storage.get_job(key)
-            if existing.get("first_seen_at") == existing.get("last_seen_at"):
-                new_count += 1
-            retrying = storage.needs_score_retry(existing)
-            if retrying:
-                retry_count += 1
-            if _needs_scoring(existing, context) or retrying:
-                to_score.append((key, existing))
+
+        def _persist_batch(jobs: List[Dict[str, Any]]) -> None:
+            nonlocal new_count, retry_count
+            for raw_job in jobs:
+                safe = make_json_safe(raw_job)
+                key = storage.upsert_job(safe)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                existing = storage.get_job(key)
+                if existing.get("first_seen_at") == existing.get("last_seen_at"):
+                    new_count += 1
+                retrying = storage.needs_score_retry(existing)
+                if retrying:
+                    retry_count += 1
+                if _needs_scoring(existing, context) or retrying:
+                    to_score.append((key, existing))
+
+        result = _scrape(
+            context,
+            progress_callback=_scrape_progress,
+            on_batch=_persist_batch,
+            should_stop=shutdown_requested,
+        )
+        # Fakes that return a list never call on_batch. Persist those here.
+        if not result.streamed:
+            _persist_batch(result.jobs)
+
+        summary["jobs_scraped"] = len(result.jobs) if result.streamed else len(seen_keys)
+        if result.streamed:
+            summary["jobs_scraped"] = len(seen_keys)
+        summary["new_jobs"] = new_count
+        summary["scrape_errors"] = list(result.errors)
+
+        if result.pair_count and result.failed_pairs == result.pair_count:
+            logger.error(
+                "Every scrape pair failed (%d): %s",
+                result.pair_count, "; ".join(result.errors),
+            )
+            summary["error"] = "Scrape failed: " + "; ".join(result.errors)
+            _close("failed")
+            return summary
+
         if retry_count:
             _report(f"{retry_count} failed scoring attempt(s) being retried…", 20)
+        else:
+            _report(f"Persisting {summary['jobs_scraped']} scraped postings…", 10)
 
         # ---- 3+4. Score fresh postings concurrently ---------------------- #
         _report(f"{len(to_score)} postings need scoring…", 25)
         scored_count = 0
         failed_count = 0
         auto_rejected = 0
-        if to_score:
+        stopped_early = False
+        if to_score and not shutdown_requested():
             agent = AIJobAgent(context.config)
             from .agent.rate_limiter import NVIDIA_RATE_LIMITER
 
@@ -327,32 +479,61 @@ def _execute_pipeline(
             max_workers = min(
                 context.max_workers or 4, max(1, len(to_score))
             )
+            failure_streak = 0
+            permanent_status: Optional[int] = None
+            permanent_count = 0
+            stop_scoring = threading.Event()
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
-                    pool.submit(_screen_one, agent, job, context): key
+                    pool.submit(_screen_one, agent, job, context, stop_scoring): key
                     for key, job in to_score
                 }
                 for future in as_completed(futures):
                     key = futures[future]
                     try:
                         annotated = future.result()
+                    except ScoringSkipped:
+                        continue
                     except ScoreFailure as exc:
                         failed_count += 1
+                        failure_streak += 1
                         logger.error("Scoring failed for %s: %s", key, exc)
                         storage.record_score_failure(key, str(exc))
+                        if exc.status in PERMANENT_STATUSES:
+                            if exc.status == permanent_status:
+                                permanent_count += 1
+                            else:
+                                permanent_status = exc.status
+                                permanent_count = 1
+                            if permanent_count >= PERMANENT_STOP_AFTER:
+                                stopped_early = True
+                                stop_scoring.set()
+                        else:
+                            permanent_status = None
+                            permanent_count = 0
+                        if failure_streak >= FAILURE_STREAK_STOP:
+                            stopped_early = True
+                            stop_scoring.set()
                         continue
                     except Exception as exc:  # noqa: BLE001 - per-job failure
                         failed_count += 1
+                        failure_streak += 1
                         logger.exception("Screening failed for %s", key)
                         storage.record_score_failure(key, repr(exc))
+                        if failure_streak >= FAILURE_STREAK_STOP:
+                            stopped_early = True
+                            stop_scoring.set()
                         continue
+                    failure_streak = 0
+                    permanent_status = None
+                    permanent_count = 0
                     storage.upsert_job(annotated, job_key_value=key)
                     # Auto-reject genuine experience mismatches. only_if
                     # status='new' keeps the user in charge: an accepted or
                     # manually rejected posting is never re-classified, and a
                     # mismatch the user accepted stays accepted.
                     if annotated.get("auto_rejected") and storage.set_job_status(
-                        key, "rejected", only_if_status="new"
+                        key, "rejected", only_if_status="new", auto=True
                     ):
                         auto_rejected += 1
                         logger.info(
@@ -372,37 +553,74 @@ def _execute_pipeline(
                 "on the next run (up to %d attempts).",
                 failed_count, storage.MAX_SCORE_ATTEMPTS,
             )
+        if stopped_early:
+            logger.warning(
+                "Scoring stopped early after repeated AI failures; remaining "
+                "jobs are left for the next run."
+            )
 
-        # ---- 5. Export + notify ------------------------------------------ #
+        circuit_tripped = stopped_early
+
+        # ---- 5. Retention + export + notify ------------------------------- #
+        # Failures here must not throw away scores already committed.
+        notes: List[str] = []
+        if result.errors:
+            notes.append("Scrape errors: " + "; ".join(result.errors))
+        if failed_count:
+            notes.append(f"{failed_count} job(s) failed scoring")
+        if circuit_tripped:
+            notes.append("Scoring stopped early after repeated AI failures")
+
+        pruned = 0
+        try:
+            if context.retention_days > 0:
+                pruned = storage.delete_jobs_older_than(context.retention_days)
+                if pruned:
+                    logger.info(
+                        "Retention: deleted %d posting(s) not seen in %d days.",
+                        pruned,
+                        context.retention_days,
+                    )
+                    _report(f"Retention: deleted {pruned} old posting(s)…", 95)
+        except Exception as exc:  # noqa: BLE001 - keep the scored rows
+            logger.exception("Retention failed")
+            notes.append(f"Retention failed: {exc}")
+
         _report("Exporting to Excel…", 96)
-        from .excel import export_excel
+        try:
+            from .excel import export_excel
 
-        export_excel()
+            export_excel()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Excel export failed")
+            notes.append(f"Excel export failed: {exc}")
 
         _report("Checking notifications…", 97)
-        alerts = notify.notify_above_threshold(context.score_threshold)
+        alerts = 0
+        try:
+            alerts = notify.notify_above_threshold(context.score_threshold)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Notification failed")
+            notes.append(f"Notify failed: {exc}")
 
+        degraded = bool(notes)
         summary.update(
-            status="completed",
-            jobs_scraped=len(scraped),
+            jobs_scraped=summary["jobs_scraped"],
             new_jobs=new_count,
             scored=scored_count,
+            score_failed=failed_count,
             auto_rejected=auto_rejected,
+            pruned=pruned,
             alerts_sent=alerts,
+            error=" | ".join(notes) or None,
         )
-        storage.finish_run(
-            run_id,
-            "completed",
-            jobs_scraped=len(scraped),
-            new_jobs=new_count,
-            scored=scored_count,
-            alerts_sent=alerts,
-        )
+        _close("degraded" if degraded else "completed")
         _report("Done.", 100)
     except Exception as exc:  # noqa: BLE001 - record failure on the run row
         logger.exception("Pipeline run failed")
         summary["error"] = str(exc)
-        storage.finish_run(run_id, "failed", error=str(exc))
+        _close("failed")
+    finally:
+        summary["duration_s"] = round(time.monotonic() - started, 1)
 
-    summary["duration_s"] = round(time.monotonic() - started, 1)
     return summary

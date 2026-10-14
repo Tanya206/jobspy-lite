@@ -182,6 +182,11 @@ export default function JobCard({ job, onStatus, busy }) {
       </div>
 
       <div className="badges">
+        {job.auto_rejected ? (
+          <span className="badge badge--warn" title="Rejected by the pipeline because required experience is outside your window">
+            auto · outside experience window
+          </span>
+        ) : null}
         {job.experience_match != null ? (
           <span className={job.experience_match ? 'badge badge--ok' : 'badge badge--no'}>
             {job.experience_match ? '✓ matches experience' : '✕ outside window'}

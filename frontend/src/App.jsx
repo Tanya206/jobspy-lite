@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getHealth } from './api.js'
+import { getHealth, getToken, setToken, setUnauthorizedHandler } from './api.js'
 import Dashboard from './components/Dashboard.jsx'
 import JobsView from './components/JobsView.jsx'
 import RunsView from './components/RunsView.jsx'
@@ -13,6 +13,13 @@ const TABS = [
 export default function App() {
   const [tab, setTab] = useState('dashboard')
   const [health, setHealth] = useState(null)
+  const [needsToken, setNeedsToken] = useState(false)
+  const [tokenDraft, setTokenDraft] = useState(() => getToken())
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => setNeedsToken(true))
+    return () => setUnauthorizedHandler(null)
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -58,6 +65,31 @@ export default function App() {
           <ThemeToggle />
         </div>
       </header>
+
+      {needsToken ? (
+        <form
+          className="token-bar"
+          onSubmit={(event) => {
+            event.preventDefault()
+            setToken(tokenDraft.trim())
+            setNeedsToken(false)
+            window.location.reload()
+          }}
+        >
+          <label className="inline">
+            API token
+            <input
+              className="input"
+              type="password"
+              value={tokenDraft}
+              onChange={(event) => setTokenDraft(event.target.value)}
+              placeholder="JOBSPY_API_TOKEN"
+              autoComplete="off"
+            />
+          </label>
+          <button className="btn btn--primary" type="submit">Save token</button>
+        </form>
+      ) : null}
 
       <nav className="tabs">
         {TABS.map((t) => (

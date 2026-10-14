@@ -24,6 +24,9 @@ class ResumeInfo(BaseModel):
 class JobListResponse(BaseModel):
     count: int
     total: int
+    # Rows matching status/auto_rejected before pagination — lets the UI show
+    # an accurate badge when only the first N jobs are loaded.
+    filtered_total: int = 0
     jobs: List[Dict[str, Any]]
 
 
@@ -32,6 +35,10 @@ class StatsResponse(BaseModel):
     new: int
     accepted: int
     rejected: int
+    # rejected split by provenance: the operator's own rejects vs the
+    # pipeline's experience-window rejects.
+    manual_rejected: int = 0
+    auto_rejected: int = 0
     avg_score: Optional[float] = None
 
 
@@ -58,7 +65,13 @@ class SettingsIn(BaseModel):
     experience_min_years: Optional[int] = None
     experience_max_years: Optional[int] = None
     score_threshold: Optional[int] = None
+    # 0 = keep everything; N = delete postings not seen in N days each run.
+    retention_days: Optional[int] = None
 
 
 class JobStatusIn(BaseModel):
     new_status: str
+
+
+class PurgeIn(BaseModel):
+    older_than_days: int

@@ -45,7 +45,14 @@ class RateLimiter:
 
                 if len(self._calls) < self.max_calls:
                     self._calls.append(now)
-                    return time.monotonic() - start
+                    waited = time.monotonic() - start
+                    try:
+                        from .observability import AI_METRICS
+
+                        AI_METRICS.record_rate_wait(waited)
+                    except Exception:  # noqa: BLE001 - metrics must not block a call
+                        pass
+                    return waited
 
                 wait_for = self.period - (now - self._calls[0])
                 # Wait, then re-check (another thread may have raced us).

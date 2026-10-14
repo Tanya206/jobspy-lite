@@ -7,10 +7,10 @@ GET  /health                liveness + component status
 GET  /                      the SPA (when built)
 POST /resume                upload a .docx resume (stored for all runs)
 GET  /resume                current resume metadata
-GET  /jobs                  list jobs (status filter, order, pagination)
+GET  /jobs                  list jobs (status filter, auto/manual reject filter, order, pagination)
 GET  /jobs/{key}            one job with full details
 POST /jobs/{key}/status     accept/reject/reset a job
-GET  /stats                 counts by status + average score
+GET  /stats                 counts by status (incl. manual vs auto rejected) + average score
 GET  /runs                  run history (newest first)
 POST /run                   start a manual pipeline run (background)
 GET  /run/latest            poll the in-flight/last manual run + progress
@@ -23,7 +23,10 @@ GET  /export.xlsx           download the Excel export
 """
 
 import logging
+import os
+import secrets
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -31,15 +34,17 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
 
 from . import notify, scheduler, storage
 from .agent.resume_io import extract_text
-from .config import EXCEL_PATH, PROJECT_ROOT
-from .pipeline import PipelineContext, run_pipeline
+from .config import EXCEL_PATH, PROJECT_ROOT, clamp_int
+from .pipeline import PipelineContext, request_shutdown, run_pipeline, wait_for_idle
 from .schemas import (
     HealthResponse,
     JobListResponse,
     JobStatusIn,
+    PurgeIn,
     ResumeInfo,
     RunLatest,
     SchedulerStatus,
@@ -47,13 +52,26 @@ from .schemas import (
     StatsResponse,
 )
 
+MAX_RESUME_BYTES = 2 * 1024 * 1024
+_LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """On shutdown, stop taking new scores and wait for the current run."""
+    yield
+    request_shutdown()
+    wait_for_idle(180)
+
 
 app = FastAPI(
     title="JobSpy Lite API",
     version="0.1.0",
     description="Scrape jobs, score them against a stored resume, run on a "
     "schedule, and get Telegram alerts for the best matches.",
+    lifespan=_lifespan,
 )
 
 app.add_middleware(
@@ -62,6 +80,51 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _presented_token(request: Request) -> str:
+    header = request.headers.get("x-api-token", "").strip()
+    if header:
+        return header
+    return request.query_params.get("token", "").strip()
+
+
+@app.middleware("http")
+async def require_api_token(request: Request, call_next):
+    """Require JOBSPY_API_TOKEN except on /health and the static dashboard.
+
+    When the token is unset, loopback clients (and the pytest TestClient)
+    stay open. Any other host is refused so a published port cannot spend
+    the NVIDIA key or read the stored resume.
+    """
+    path = request.url.path
+    if (
+        request.method == "OPTIONS"
+        or path == "/health"
+        or path == "/"
+        or path.startswith("/assets")
+    ):
+        return await call_next(request)
+    expected = os.environ.get("JOBSPY_API_TOKEN", "").strip()
+    if expected:
+        presented = _presented_token(request)
+        if len(presented) == len(expected) and secrets.compare_digest(presented, expected):
+            return await call_next(request)
+        return _unauthorized("Unauthorized")
+    host = request.client.host if request.client else ""
+    if host in _LOCAL_HOSTS:
+        return await call_next(request)
+    logger.warning(
+        "Refusing %s %s from %s: JOBSPY_API_TOKEN is unset.",
+        request.method, path, host or "unknown",
+    )
+    return _unauthorized("API token is not configured.")
+
+
+def _unauthorized(detail: str) -> JSONResponse:
+    response = JSONResponse(status_code=401, content={"detail": detail})
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
 
 # In-flight manual-run state (process-local; run rows live in SQLite).
 _run_state_lock = threading.Lock()
@@ -108,6 +171,8 @@ async def upload_resume(resume: UploadFile = File(...)) -> ResumeInfo:
     data = await resume.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty resume file.")
+    if len(data) > MAX_RESUME_BYTES:
+        raise HTTPException(status_code=413, detail="Resume must be 2 MB or smaller.")
     try:
         text = extract_text(data)
     except Exception as exc:  # noqa: BLE001
@@ -147,15 +212,27 @@ def resume_info() -> ResumeInfo:
 @app.get("/jobs", response_model=JobListResponse)
 def list_jobs_endpoint(
     status: Optional[str] = None,
+    auto_rejected: Optional[bool] = None,
     order: str = "score",
     limit: Optional[int] = None,
     offset: int = 0,
 ) -> JobListResponse:
+    """List jobs; ``auto_rejected`` narrows rejected rows to the pipeline's
+    experience-window rejects (true) or the operator's own rejects (false)."""
     if status and status not in ("new", "accepted", "rejected"):
         raise HTTPException(status_code=400, detail="status must be new/accepted/rejected.")
-    jobs = storage.list_jobs(status=status, limit=limit, offset=offset, order=order)
+    jobs = storage.list_jobs(
+        status=status, limit=limit, offset=offset, order=order,
+        auto_rejected=auto_rejected,
+    )
     counts = storage.counts_by_status()
-    return JobListResponse(count=len(jobs), total=counts.get("total", 0), jobs=jobs)
+    filtered_total = storage.count_jobs(status=status, auto_rejected=auto_rejected)
+    return JobListResponse(
+        count=len(jobs),
+        total=counts.get("total", 0),
+        filtered_total=filtered_total,
+        jobs=jobs,
+    )
 
 
 @app.get("/jobs/{job_key:path}")
@@ -185,6 +262,8 @@ def stats() -> StatsResponse:
         new=counts.get("new", 0),
         accepted=counts.get("accepted", 0),
         rejected=counts.get("rejected", 0),
+        manual_rejected=counts.get("manual_rejected", 0),
+        auto_rejected=counts.get("auto_rejected", 0),
         avg_score=counts.get("avg_score"),
     )
 
@@ -284,13 +363,19 @@ def get_settings() -> Dict[str, Any]:
         "experience_max_years": context.experience_max,
         "score_threshold": context.score_threshold,
         "max_workers": context.max_workers,
+        "retention_days": context.retention_days,
     }
 
 
 @app.post("/settings")
 def update_settings(settings: SettingsIn) -> Dict[str, Any]:
     if settings.scrape_params is not None:
-        storage.set_setting("scrape_params", settings.scrape_params)
+        params = dict(settings.scrape_params)
+        if "results_wanted" in params:
+            params["results_wanted"] = clamp_int(params.get("results_wanted"), 1, 200, 15)
+        if "hours_old" in params:
+            params["hours_old"] = clamp_int(params.get("hours_old"), 1, 168, 24)
+        storage.set_setting("scrape_params", params)
     if settings.agent_params is not None:
         params = dict(settings.agent_params)
         # API keys are env/server-only, never dashboard-editable.
@@ -305,6 +390,8 @@ def update_settings(settings: SettingsIn) -> Dict[str, Any]:
             params["ai_rate_limit_per_min"] = max(0, int(rate)) if rate is not None else 30
         except (TypeError, ValueError):
             params["ai_rate_limit_per_min"] = 30
+        if "max_workers" in params:
+            params["max_workers"] = clamp_int(params.get("max_workers"), 1, 8, 4)
         storage.set_setting("agent_params", params)
     if settings.experience_min_years is not None:
         storage.set_setting("experience_min_years", settings.experience_min_years)
@@ -312,6 +399,9 @@ def update_settings(settings: SettingsIn) -> Dict[str, Any]:
         storage.set_setting("experience_max_years", settings.experience_max_years)
     if settings.score_threshold is not None:
         storage.set_setting("score_threshold", settings.score_threshold)
+    if settings.retention_days is not None:
+        # 0 = keep everything; negative values are clamped to 0.
+        storage.set_setting("retention_days", max(0, int(settings.retention_days)))
     return get_settings()
 
 
@@ -332,6 +422,17 @@ def export_xlsx() -> FileResponse:
 # --------------------------------------------------------------------------- #
 # Notification test
 # --------------------------------------------------------------------------- #
+@app.post("/maintenance/purge")
+def purge_old_data(payload: PurgeIn) -> Dict[str, int]:
+    """Delete jobs and run history older than N days. Accepted jobs stay."""
+    if payload.older_than_days < 1:
+        raise HTTPException(status_code=400, detail="older_than_days must be >= 1.")
+    try:
+        return storage.purge_older_than(payload.older_than_days)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/notify/test")
 def notify_test() -> Dict[str, Any]:
     """Send any pending above-threshold matches to Telegram right now."""

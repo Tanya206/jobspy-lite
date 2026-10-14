@@ -13,10 +13,13 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel
 
+from .observability import AI_METRICS
+from .rate_limiter import NVIDIA_RATE_LIMITER
+
 
 logger = logging.getLogger(__name__)
 
-MAX_PARSE_ATTEMPTS = 10
+MAX_PARSE_ATTEMPTS = 4
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 120
 
@@ -66,13 +69,22 @@ class AIClient:
         """Chat completion with native structured output, validated against text_format.
 
         Transient NVIDIA errors (429/503 bursts) are retried with exponential
-        backoff + jitter; permanent errors fail fast to the caller. ``label``
-        (e.g. the job title) is included in every log line so retries and
-        rate-limit waits are traceable per job.
+        backoff + jitter; permanent errors fail fast to the caller. Every
+        attempt acquires the shared rate limiter first, so a retry cannot
+        burst past the cap. ``label`` (e.g. the job title) is included in
+        every log line so retries and rate-limit waits are traceable per job.
         """
         last_error = None
 
         for attempt in range(1, MAX_PARSE_ATTEMPTS + 1):
+            waited = NVIDIA_RATE_LIMITER.acquire()
+            if waited > 1.0:
+                logger.info(
+                    "%s: waited %.1fs for a rate-limit slot (call %d/%d this window)",
+                    label, waited, NVIDIA_RATE_LIMITER.recent_count(),
+                    NVIDIA_RATE_LIMITER.max_calls,
+                )
+            started = time.monotonic()
             try:
                 response = self._client.beta.chat.completions.parse(
                     model=self.ai_model,
@@ -80,6 +92,7 @@ class AIClient:
                     response_format=text_format,
                     temperature=temperature,
                 )
+                AI_METRICS.record_attempt(time.monotonic() - started)
                 message = response.choices[0].message
                 parsed = message.parsed
                 if parsed is None:
@@ -93,16 +106,19 @@ class AIClient:
                 result = text_format.model_validate(parsed)
                 if attempt > 1:
                     logger.info("%s: succeeded on attempt %d/%d", label, attempt, MAX_PARSE_ATTEMPTS)
+                AI_METRICS.record_call(True)
                 return result
             except Exception as exc:
                 last_error = exc
                 status = getattr(getattr(exc, "response", None), "status_code", None)
+                AI_METRICS.record_attempt(time.monotonic() - started, status)
                 permanent = status is not None and status not in RETRYABLE_STATUS_CODES
                 if attempt == MAX_PARSE_ATTEMPTS or permanent:
                     logger.error(
                         "%s: FAILED after %d attempts%s: %s",
                         label, attempt, " (permanent error)" if permanent else "", exc,
                     )
+                    AI_METRICS.record_call(False, str(exc))
                     break
                 delay = min(
                     INITIAL_RETRY_DELAY_SECONDS * (2 ** (attempt - 1)),

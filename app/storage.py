@@ -21,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import DB_PATH
 from .util import make_json_safe
@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     scored_at          TEXT,
     scored_with_resume TEXT,
     score_attempts     INTEGER NOT NULL DEFAULT 0,
-    score_error        TEXT
+    score_error        TEXT,
+    auto_rejected      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -102,6 +103,9 @@ def connect() -> sqlite3.Connection:
             _conn.row_factory = sqlite3.Row
             _conn.execute("PRAGMA journal_mode=WAL")
             _conn.execute("PRAGMA foreign_keys=ON")
+            # A second process (--once while --serve is up) waits instead of
+            # raising "database is locked" on the first collision.
+            _conn.execute("PRAGMA busy_timeout=5000")
             _conn.executescript(_SCHEMA)
             _migrate()
             _conn.execute(_STALE_FAILURE_SQL)
@@ -110,15 +114,48 @@ def connect() -> sqlite3.Connection:
         return _conn
 
 
+# One-time backfill marker: legacy rows carry no auto/manual provenance, so
+# the heuristic below must not re-run (it would flip a user's later manual
+# reject of an experience-mismatch job back to 'auto').
+_AUTO_REJECT_BACKFILL_KEY = "auto_rejected_backfilled"
+
+
 def _migrate() -> None:
     """Lightweight column additions for pre-existing databases."""
     cols = {row["name"] for row in _conn.execute("PRAGMA table_info(jobs)")}
     for name, ddl in (
         ("score_attempts", "ALTER TABLE jobs ADD COLUMN score_attempts INTEGER NOT NULL DEFAULT 0"),
         ("score_error", "ALTER TABLE jobs ADD COLUMN score_error TEXT"),
+        ("auto_rejected", "ALTER TABLE jobs ADD COLUMN auto_rejected INTEGER NOT NULL DEFAULT 0"),
     ):
         if name not in cols:
             _conn.execute(ddl)
+    run_cols = {row["name"] for row in _conn.execute("PRAGMA table_info(runs)")}
+    for name, ddl in (
+        ("score_failed", "ALTER TABLE runs ADD COLUMN score_failed INTEGER"),
+        ("auto_rejected", "ALTER TABLE runs ADD COLUMN auto_rejected INTEGER"),
+        ("pruned", "ALTER TABLE runs ADD COLUMN pruned INTEGER"),
+        ("scrape_errors", "ALTER TABLE runs ADD COLUMN scrape_errors TEXT"),
+        ("ai_metrics", "ALTER TABLE runs ADD COLUMN ai_metrics TEXT"),
+    ):
+        if name not in run_cols:
+            _conn.execute(ddl)
+    # One-time backfill for rows written before auto/manual was tracked:
+    # rejected rows the pipeline flagged as experience mismatches are the
+    # auto-rejected ones. Runs once (guarded by a settings row) because a
+    # later manual reject can legitimately carry the same mismatch data.
+    marker = _conn.execute(
+        "SELECT value FROM settings WHERE key = ?", (_AUTO_REJECT_BACKFILL_KEY,)
+    ).fetchone()
+    if marker is None:
+        _conn.execute(
+            "UPDATE jobs SET auto_rejected = 1 "
+            "WHERE status = 'rejected' AND experience_match = 0"
+        )
+        _conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, 'true')",
+            (_AUTO_REJECT_BACKFILL_KEY,),
+        )
 
 
 @contextmanager
@@ -308,21 +345,49 @@ def _decode_job(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return job
 
 
+def _status_filter(
+    status: Optional[str], auto_rejected: Optional[bool]
+) -> Tuple[str, List[Any]]:
+    """WHERE clause fragment (leading ' WHERE ' when non-empty) + params."""
+    clauses: List[str] = []
+    params: List[Any] = []
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if auto_rejected is not None:
+        clauses.append("auto_rejected = ?")
+        params.append(1 if auto_rejected else 0)
+    if not clauses:
+        return "", []
+    return " WHERE " + " AND ".join(clauses), params
+
+
+def count_jobs(
+    status: Optional[str] = None, auto_rejected: Optional[bool] = None
+) -> int:
+    """Number of jobs matching the filter, ignoring pagination."""
+    where, params = _status_filter(status, auto_rejected)
+    row = query_one(f"SELECT COUNT(*) AS n FROM jobs{where}", tuple(params))
+    return row["n"] if row else 0
+
+
 def list_jobs(
     status: Optional[str] = None,
     limit: Optional[int] = None,
     offset: int = 0,
     order: str = "score",
+    auto_rejected: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
-    """Jobs as dicts, newest-first within equal scores, with parsed skills."""
+    """Jobs as dicts, newest-first within equal scores, with parsed skills.
+
+    ``auto_rejected`` narrows to pipeline-rejected (True) or manually
+    rejected (False) rows; combined with ``status='rejected'`` it keeps the
+    board's Rejected section to the operator's own decisions.
+    """
     allowed_orders = {"score": "score DESC", "recent": "last_seen_at DESC", "title": "title ASC"}
     order_clause = allowed_orders.get(order, allowed_orders["score"])
-    sql = "SELECT * FROM jobs"
-    params: list = []
-    if status:
-        sql += " WHERE status = ?"
-        params.append(status)
-    sql += f" ORDER BY {order_clause}"
+    where, params = _status_filter(status, auto_rejected)
+    sql = f"SELECT * FROM jobs{where} ORDER BY {order_clause}"
     if limit is not None:
         sql += " LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -330,37 +395,72 @@ def list_jobs(
 
 
 def counts_by_status() -> Dict[str, int]:
-    """Job counts keyed by status, plus total and average score."""
+    """Job counts keyed by status, plus total and average score.
+
+    ``rejected`` stays the full rejected count; ``auto_rejected`` /
+    ``manual_rejected`` split it so the UI can show the operator's own
+    rejects separately from the pipeline's experience-window rejects.
+    """
     rows = query("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
     counts = {row["status"]: row["n"] for row in rows}
     total = sum(counts.values())
     avg = query_one("SELECT AVG(score) AS avg_score FROM jobs WHERE score IS NOT NULL")
     counts["total"] = total
     counts["avg_score"] = round(avg["avg_score"], 1) if avg and avg["avg_score"] is not None else None
+    split = query_one(
+        "SELECT SUM(CASE WHEN auto_rejected = 1 THEN 1 ELSE 0 END) AS auto_n, "
+        "       SUM(CASE WHEN auto_rejected = 0 THEN 1 ELSE 0 END) AS manual_n "
+        "FROM jobs WHERE status = 'rejected'"
+    ) or {}
+    counts["auto_rejected"] = split.get("auto_n") or 0
+    counts["manual_rejected"] = split.get("manual_n") or 0
     return counts
 
 
 def set_job_status(
-    job_key_value: str, status: str, *, only_if_status: Optional[str] = None
+    job_key_value: str,
+    status: str,
+    *,
+    only_if_status: Optional[str] = None,
+    auto: bool = False,
 ) -> bool:
     """Set a job's user status (new/accepted/rejected). Returns True if it exists.
 
     Pass ``only_if_status`` for a compare-and-set update: the status changes
     only when the stored status still equals that value (used by the
     auto-reject rule so it never clobbers a user's accept/reject).
+
+    ``auto=True`` marks the row as pipeline-rejected (hidden from the
+    board's Rejected section); any other call clears that mark, so a user
+    who rejects a job themselves always owns the decision.
     """
     if status not in ("new", "accepted", "rejected"):
         raise ValueError(f"Invalid status '{status}'.")
     if only_if_status is not None and only_if_status not in ("new", "accepted", "rejected"):
         raise ValueError(f"Invalid guard status '{only_if_status}'.")
     with transaction() as conn:
-        sql = "UPDATE jobs SET status = ? WHERE job_key = ?"
-        params: list = [status, job_key_value]
+        sql = "UPDATE jobs SET status = ?, auto_rejected = ? WHERE job_key = ?"
+        params: list = [status, 1 if (auto and status == "rejected") else 0, job_key_value]
         if only_if_status is not None:
             sql += " AND status = ?"
             params.append(only_if_status)
         cursor = conn.execute(sql, tuple(params))
         return cursor.rowcount > 0
+
+
+def delete_jobs_older_than(days: int) -> int:
+    """Delete jobs not seen for ``days`` days; returns rows removed.
+
+    ``0`` (or less) disables pruning. Cutoff uses ``last_seen_at`` so a
+    posting still live on the boards keeps being refreshed and is never
+    aged out — only rows that disappeared from the scrapes get deleted.
+    """
+    if days <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with transaction() as conn:
+        cursor = conn.execute("DELETE FROM jobs WHERE last_seen_at < ?", (cutoff,))
+        return cursor.rowcount
 
 
 def mark_notified(job_keys: List[str]) -> None:
@@ -394,25 +494,57 @@ def finish_run(
     scored: Optional[int] = None,
     alerts_sent: Optional[int] = None,
     error: Optional[str] = None,
+    score_failed: Optional[int] = None,
+    auto_rejected: Optional[int] = None,
+    pruned: Optional[int] = None,
+    scrape_errors: Optional[List[str]] = None,
+    ai_metrics: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Complete a run row with its outcome counters."""
+    """Complete a run row with its outcome counters.
+
+    ``scrape_errors`` and ``ai_metrics`` are stored as JSON text. Null leaves
+    the column unset (early failures that never reached that stage).
+    """
+    errors_json = json.dumps(scrape_errors, ensure_ascii=False) if scrape_errors else None
+    metrics_json = (
+        json.dumps(make_json_safe(ai_metrics), ensure_ascii=False) if ai_metrics else None
+    )
     with transaction() as conn:
         conn.execute(
             """
             UPDATE runs
                SET status = ?, finished_at = ?, jobs_scraped = ?, new_jobs = ?,
-                   scored = ?, alerts_sent = ?, error = ?
+                   scored = ?, alerts_sent = ?, error = ?,
+                   score_failed = ?, auto_rejected = ?, pruned = ?,
+                   scrape_errors = ?, ai_metrics = ?
              WHERE run_id = ?
             """,
-            (status, _utc_now(), jobs_scraped, new_jobs, scored, alerts_sent, error, run_id),
+            (
+                status, _utc_now(), jobs_scraped, new_jobs, scored, alerts_sent, error,
+                score_failed, auto_rejected, pruned, errors_json, metrics_json, run_id,
+            ),
         )
 
 
 def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
-    """Recent runs, newest first."""
-    return query(
+    """Recent runs, newest first, with JSON columns decoded."""
+    return [_decode_run(row) for row in query(
         "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
-    )
+    )]
+
+
+def _decode_run(row: Dict[str, Any]) -> Dict[str, Any]:
+    run = dict(row)
+    for column in ("scrape_errors", "ai_metrics"):
+        raw = run.get(column)
+        if not raw:
+            run[column] = [] if column == "scrape_errors" else None
+            continue
+        try:
+            run[column] = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            run[column] = [] if column == "scrape_errors" else None
+    return run
 
 
 def reap_stale_runs(max_age_minutes: Optional[int] = 30) -> int:
@@ -511,7 +643,29 @@ def needs_score_retry(row: Dict[str, Any]) -> bool:
 
 
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:
-    return query_one("SELECT * FROM runs WHERE run_id = ?", (run_id,))
+    row = query_one("SELECT * FROM runs WHERE run_id = ?", (run_id,))
+    return _decode_run(row) if row else None
+
+
+def purge_older_than(days: int) -> Dict[str, int]:
+    """Delete jobs and run history older than ``days`` (by first seen / start).
+
+    Accepted jobs are kept. ``days`` must be at least 1 — callers reject 0
+    so this cannot wipe the board. Returns ``{"jobs_deleted", "runs_deleted"}``.
+    """
+    if days < 1:
+        raise ValueError("older_than_days must be >= 1.")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with transaction() as conn:
+        jobs = conn.execute(
+            "DELETE FROM jobs WHERE first_seen_at < ? AND status != 'accepted'",
+            (cutoff,),
+        )
+        runs = conn.execute(
+            "DELETE FROM runs WHERE started_at < ?",
+            (cutoff,),
+        )
+        return {"jobs_deleted": jobs.rowcount, "runs_deleted": runs.rowcount}
 
 
 # --------------------------------------------------------------------------- #

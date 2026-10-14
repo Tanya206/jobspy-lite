@@ -8,7 +8,6 @@ Agent 2  ``assess_suitability``       : score how well a resume fits a job.
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
-from .rate_limiter import NVIDIA_RATE_LIMITER
 import yaml
 _RATE_LIMIT_CONFIGURED = False
 
@@ -30,7 +29,7 @@ def configure_rate_limit() -> None:
     _RATE_LIMIT_CONFIGURED = True
     try:
         from ..config import AI_RATE_LIMIT_PER_MIN
-        from .rate_limiter import DEFAULT_RATE_LIMIT
+        from .rate_limiter import DEFAULT_RATE_LIMIT, NVIDIA_RATE_LIMITER
         if (
             AI_RATE_LIMIT_PER_MIN > 0
             and NVIDIA_RATE_LIMITER.max_calls == DEFAULT_RATE_LIMIT
@@ -63,15 +62,6 @@ class AIJobAgent:
     # Agent 1 — experience-years estimate
     # ------------------------------------------------------------------ #
     def _estimate_required_years(self, job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        waited = NVIDIA_RATE_LIMITER.acquire()  # blocks until a slot is free
-        if waited > 1.0:
-            logger.info(
-                "%s: waited %.1fs for a rate-limit slot (call %d/%d this window)",
-                "ai-call", waited, NVIDIA_RATE_LIMITER.recent_count(),
-                NVIDIA_RATE_LIMITER.max_calls,
-            )
-
-
         prompt = self._load_prompts()["experience_years_prompt"].format(
             title=job.get("title", ""),
             description=job.get("description", ""),
@@ -118,13 +108,6 @@ class AIJobAgent:
     # ------------------------------------------------------------------ #
     def assess_suitability(self, job: Dict[str, Any], resume_text: str) -> Dict[str, Any]:
         """Assess how well resume_text fits job. Returns score, verdict, skills, reasoning."""
-        waited = NVIDIA_RATE_LIMITER.acquire()  # blocks until a slot is free
-        if waited > 1.0:
-            logger.info(
-                "%s: waited %.1fs for a rate-limit slot (call %d/%d this window)",
-                "ai-call", waited, NVIDIA_RATE_LIMITER.recent_count(),
-                NVIDIA_RATE_LIMITER.max_calls,
-            )
         prompt = self._load_prompts()["screen_prompt"].format(
             resume=resume_text,
             title=job.get("title", ""),

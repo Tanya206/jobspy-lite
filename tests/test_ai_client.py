@@ -89,3 +89,27 @@ def test_parse_gives_up_after_max_attempts(monkeypatch):
         client.parse(messages=[{"role": "user", "content": "hi"}], text_format=Out)
 
     assert calls["n"] == MAX_PARSE_ATTEMPTS
+
+
+def test_parse_acquires_a_rate_limit_slot_on_every_attempt(monkeypatch):
+    """Retries must not skip the shared limiter (that is what caused 429 bursts)."""
+    client = _client()
+    acquires = {"n": 0}
+
+    def acquire():
+        acquires["n"] += 1
+        return 0.0
+
+    def flaky(**kwargs):
+        if acquires["n"] < 2:
+            raise _FakeHTTPError(503)
+        return _ok_response()
+
+    monkeypatch.setattr("app.agent.ai_client.NVIDIA_RATE_LIMITER.acquire", acquire)
+    monkeypatch.setattr(client._client.beta.chat.completions, "parse", flaky)
+    monkeypatch.setattr("app.agent.ai_client.time.sleep", lambda _s: None)
+
+    out = client.parse(messages=[{"role": "user", "content": "hi"}], text_format=Out)
+
+    assert out.score == 7
+    assert acquires["n"] == 2

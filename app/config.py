@@ -53,6 +53,14 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def clamp_int(value: Any, low: int, high: int, default: int) -> int:
+    """Clamp ``value`` into ``[low, high]``; ``default`` when it is not an int."""
+    try:
+        return min(high, max(low, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _env_list(name: str, default: List[str]) -> List[str]:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":

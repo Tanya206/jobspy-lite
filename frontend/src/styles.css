@@ -48,6 +48,11 @@ body {
 .brand__name b { color: var(--accent); }
 .brand__tag { margin: 2px 0 0; color: var(--text-dim); font-size: 12px; }
 .header__side { display: flex; align-items: center; gap: 10px; }
+.token-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0; padding: 10px 22px; border-bottom: 1px solid var(--panel-edge);
+  background: var(--bg-soft);
+}
 
 .health-pill {
   display: inline-flex; align-items: center; gap: 7px;

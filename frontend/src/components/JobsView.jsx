@@ -11,12 +11,15 @@ const FILTERS = [
   { key: 'ai-failed', label: 'AI failed' },
 ]
 
+const REJECTED_PAGE = 200
+
 export default function JobsView() {
   const [filter, setFilter] = useState('all')
   const [order, setOrder] = useState('score')
   const [search, setSearch] = useState('')
   const [jobs, setJobs] = useState([])
-  const [counts, setCounts] = useState({ total: 0, new: 0, accepted: 0, rejected: 0 })
+  const [rejectedJobs, setRejectedJobs] = useState([])
+  const [rejectedTotal, setRejectedTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [busyKey, setBusyKey] = useState(null)
@@ -26,17 +29,14 @@ export default function JobsView() {
     setLoading(true)
     setError(null)
     try {
-      const data = await getJobs({ order })
-      setJobs(data.jobs || [])
-      getJobs({ status: 'rejected', order })
-        .then((r) => setCounts((c) => ({ ...c, rejected: r.total })))
-        .catch(() => {})
-      getJobs({ status: 'accepted', order })
-        .then((r) => setCounts((c) => ({ ...c, accepted: r.total })))
-        .catch(() => {})
-      getJobs({ status: 'new', order })
-        .then((r) => setCounts((c) => ({ ...c, new: r.total })))
-        .catch(() => {})
+      const [data, rejectedData] = await Promise.all([
+        getJobs({ order }),
+        // Rejected includes both manual rejects and pipeline auto-rejects.
+        getJobs({ status: 'rejected', order, limit: REJECTED_PAGE }),
+      ])
+      setJobs((data.jobs || []).filter((j) => (j.status || 'new') !== 'rejected'))
+      setRejectedJobs(rejectedData.jobs || [])
+      setRejectedTotal(rejectedData.filtered_total ?? (rejectedData.jobs || []).length)
     } catch (e) {
       setError(e)
     } finally {
@@ -50,17 +50,31 @@ export default function JobsView() {
   }, [order])
 
   async function handleStatus(job, status) {
-    const prev = jobs
+    const prev = { jobs, rejectedJobs, rejectedTotal }
+    const wasRejected = (job.status || 'new') === 'rejected'
     setBusyKey(job.job_key)
-    // Optimistic update; roll back on failure.
-    setJobs((list) =>
-      list.map((j) => (j.job_key === job.job_key ? { ...j, status } : j)),
-    )
+    // Optimistic update: keep the card in the section that matches its new
+    // status; roll back on failure.
+    if (wasRejected && status !== 'rejected') {
+      setRejectedJobs((list) => list.filter((j) => j.job_key !== job.job_key))
+      setJobs((list) => [{ ...job, status }, ...list])
+      setRejectedTotal((n) => Math.max(0, n - 1))
+    } else if (!wasRejected && status === 'rejected') {
+      setJobs((list) => list.filter((j) => j.job_key !== job.job_key))
+      setRejectedJobs((list) => [{ ...job, status }, ...list.filter((j) => j.job_key !== job.job_key)])
+      setRejectedTotal((n) => n + 1)
+    } else {
+      const patch = (list) => list.map((j) => (j.job_key === job.job_key ? { ...j, status } : j))
+      setJobs(patch)
+      setRejectedJobs(patch)
+    }
     try {
       await setJobStatus(job.job_key, status)
     } catch (e) {
       setError(e)
-      setJobs(prev)
+      setJobs(prev.jobs)
+      setRejectedJobs(prev.rejectedJobs)
+      setRejectedTotal(prev.rejectedTotal)
     } finally {
       setBusyKey(null)
     }
@@ -79,20 +93,13 @@ export default function JobsView() {
     } else if (filter !== 'all') {
       list = list.filter((j) => (j.status || 'new') === filter)
     }
-    if (search.trim()) {
-      const needle = search.trim().toLowerCase()
-      list = list.filter(
-        (j) =>
-          (j.title || '').toLowerCase().includes(needle) ||
-          (j.company || '').toLowerCase().includes(needle) ||
-          (j.location || '').toLowerCase().includes(needle),
-      )
-    }
-    return list
+    return searchFilter(list, search)
   }, [jobs, filter, search])
 
-  const main = visible.filter((j) => (j.status || 'new') !== 'rejected')
-  const rejected = visible.filter((j) => (j.status || 'new') === 'rejected')
+  const rejectedVisible = useMemo(
+    () => searchFilter(rejectedJobs, search),
+    [rejectedJobs, search],
+  )
 
   return (
     <section>
@@ -141,25 +148,48 @@ export default function JobsView() {
       ) : null}
 
       <div className="grid">
-        {main.map((job) => (
+        {visible.map((job) => (
           <JobCard key={job.job_key} job={job} onStatus={handleStatus} busy={busyKey === job.job_key} />
         ))}
       </div>
 
-      {rejected.length ? (
+      {rejectedTotal > 0 || rejectedVisible.length ? (
         <div className="rejected-section">
           <button className="rejected-toggle" onClick={() => setRejectedOpen((v) => !v)}>
-            ✕ Rejected ({rejected.length}) {rejectedOpen ? '▲' : '▼'}
+            ✕ Rejected ({rejectedTotal}) {rejectedOpen ? '▲' : '▼'}
           </button>
           {rejectedOpen ? (
-            <div className="grid">
-              {rejected.map((job) => (
-                <JobCard key={job.job_key} job={job} onStatus={handleStatus} busy={busyKey === job.job_key} />
-              ))}
-            </div>
+            <>
+              {rejectedTotal > rejectedJobs.length ? (
+                <p className="muted small">
+                  Showing the first {rejectedJobs.length} of {rejectedTotal} — refine with search or clear old
+                  ones via the retention setting on the Overview.
+                </p>
+              ) : null}
+              {rejectedVisible.length ? (
+                <div className="grid">
+                  {rejectedVisible.map((job) => (
+                    <JobCard key={job.job_key} job={job} onStatus={handleStatus} busy={busyKey === job.job_key} />
+                  ))}
+                </div>
+              ) : (
+                <p className="muted small">Nothing matches your search.</p>
+              )}
+            </>
           ) : null}
         </div>
       ) : null}
     </section>
+  )
+}
+
+function searchFilter(list, search) {
+  if (!search.trim()) return list
+  const needle = search.trim().toLowerCase()
+  return list.filter(
+    (j) =>
+      (j.title || '').toLowerCase().includes(needle) ||
+      (j.company || '').toLowerCase().includes(needle) ||
+      (j.location || '').toLowerCase().includes(needle),
   )
 }
