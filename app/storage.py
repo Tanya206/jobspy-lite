@@ -420,7 +420,9 @@ def _decode_job(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 def _status_filter(
-    status: Optional[str], auto_rejected: Optional[bool]
+    status: Optional[str],
+    auto_rejected: Optional[bool],
+    ai_failed: bool = False,
 ) -> Tuple[str, List[Any]]:
     """WHERE clause fragment (leading ' WHERE ' when non-empty) + params."""
     clauses: List[str] = []
@@ -431,16 +433,22 @@ def _status_filter(
     if auto_rejected is not None:
         clauses.append("auto_rejected = ?")
         params.append(1 if auto_rejected else 0)
+    if ai_failed:
+        clauses.append(
+            "score IS NULL AND score_error IS NOT NULL AND score_attempts > 0"
+        )
     if not clauses:
         return "", []
     return " WHERE " + " AND ".join(clauses), params
 
 
 def count_jobs(
-    status: Optional[str] = None, auto_rejected: Optional[bool] = None
+    status: Optional[str] = None,
+    auto_rejected: Optional[bool] = None,
+    ai_failed: bool = False,
 ) -> int:
     """Number of jobs matching the filter, ignoring pagination."""
-    where, params = _status_filter(status, auto_rejected)
+    where, params = _status_filter(status, auto_rejected, ai_failed)
     row = query_one(f"SELECT COUNT(*) AS n FROM jobs{where}", tuple(params))
     return row["n"] if row else 0
 
@@ -451,16 +459,20 @@ def list_jobs(
     offset: int = 0,
     order: str = "score",
     auto_rejected: Optional[bool] = None,
+    ai_failed: bool = False,
 ) -> List[Dict[str, Any]]:
     """Jobs as dicts, newest-first within equal scores, with parsed skills.
 
     ``auto_rejected`` narrows to pipeline-rejected (True) or manually
     rejected (False) rows; combined with ``status='rejected'`` it keeps the
     board's Rejected section to the operator's own decisions.
+
+    ``ai_failed`` keeps rows whose score is still empty after at least one
+    scoring failure, including rows past the retry cap.
     """
     allowed_orders = {"score": "score DESC", "recent": "last_seen_at DESC", "title": "title ASC"}
     order_clause = allowed_orders.get(order, allowed_orders["score"])
-    where, params = _status_filter(status, auto_rejected)
+    where, params = _status_filter(status, auto_rejected, ai_failed)
     sql = f"SELECT * FROM jobs{where} ORDER BY {order_clause}"
     if limit is not None:
         sql += " LIMIT ? OFFSET ?"
@@ -723,6 +735,28 @@ def needs_score_retry(row: Dict[str, Any]) -> bool:
         and bool(row.get("score_error"))
         and attempts < MAX_SCORE_ATTEMPTS
     )
+
+
+def jobs_pending_score_retry() -> List[Dict[str, Any]]:
+    """Unscored new jobs with attempts left, oldest first.
+
+    Callers snapshot this before scoring a run. A job that fails during
+    that run's fresh batch is not in the snapshot, so it waits for a later
+    run instead of being tried twice in one pass.
+    """
+    rows = query(
+        """
+        SELECT * FROM jobs
+         WHERE status = 'new'
+           AND score IS NULL
+           AND score_error IS NOT NULL
+           AND score_attempts > 0
+           AND score_attempts < ?
+         ORDER BY first_seen_at ASC
+        """,
+        (MAX_SCORE_ATTEMPTS,),
+    )
+    return [job for job in (_decode_job(row) for row in rows) if job]
 
 
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:

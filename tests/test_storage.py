@@ -239,6 +239,49 @@ def test_stale_failure_marks_cleaned_at_connect(temp_db):
     assert failed["score_error"] == "NVIDIA down"  # real failure untouched
 
 
+def test_ai_failed_list_is_not_hidden_by_score_order(temp_db):
+    """A null score sorts after every scored job, so the board page misses it.
+    The ai_failed filter returns that row and skips a scored row that still
+    wears a stale error."""
+    scored = storage.upsert_job(_job("scored", score=90, verdict="strong"))
+    failed = storage.upsert_job(_job("failed"))
+    storage.record_score_failure(failed, "NVIDIA down")
+    stale = storage.upsert_job(_job("stale", score=40, verdict="weak"))
+    with storage.transaction() as conn:
+        conn.execute(
+            "UPDATE jobs SET score_attempts = 2, score_error = 'torn' WHERE job_key = ?",
+            (stale,),
+        )
+
+    assert [job["job_key"] for job in storage.list_jobs(order="score", limit=1)] == [scored]
+    assert [job["job_key"] for job in storage.list_jobs(ai_failed=True)] == [failed]
+    assert storage.count_jobs(ai_failed=True) == 1
+
+
+def test_pending_score_retry_is_oldest_new_under_the_cap(temp_db):
+    older = storage.upsert_job(_job("older"))
+    newer = storage.upsert_job(_job("newer"))
+    storage.record_score_failure(older, "down")
+    storage.record_score_failure(newer, "down")
+    exhausted = storage.upsert_job(_job("exhausted"))
+    for _ in range(storage.MAX_SCORE_ATTEMPTS):
+        storage.record_score_failure(exhausted, "down")
+    rejected = storage.upsert_job(_job("rejected"))
+    storage.record_score_failure(rejected, "down")
+    storage.set_job_status(rejected, "rejected")
+    with storage.transaction() as conn:
+        conn.execute(
+            "UPDATE jobs SET first_seen_at = ? WHERE job_key = ?",
+            ("2020-01-01T00:00:00+00:00", older),
+        )
+        conn.execute(
+            "UPDATE jobs SET first_seen_at = ? WHERE job_key = ?",
+            ("2020-06-01T00:00:00+00:00", newer),
+        )
+
+    assert [job["job_key"] for job in storage.jobs_pending_score_retry()] == [older, newer]
+
+
 def test_unscored_match_zero_cleaned_at_connect(temp_db):
     """Startup cleanup NULLs experience_match on rows the old build wrote as
     raw-0 (no score, no verdict, no years); assessed rows stay 1/0."""

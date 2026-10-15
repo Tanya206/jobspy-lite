@@ -3,18 +3,21 @@
 Sequence (each run, cron or manual):
   1. Scrape every configured search term/site (config + settings overrides).
   2. Upsert raw jobs so nothing is lost, and detect which are new.
-  3. Score only what needs scoring:
-     - new jobs, or rows with no score yet, or rows whose stored resume hash
-       predates the current resume (resume changed since scoring), or rows
-       last scored more than RESCORE_AFTER_HOURS ago, or ``force_rescore``.    4. Persist annotations (required years, experience match, score, skills);
+  3. Score fresh postings first (new, unscored, resume change, stale, or
+     ``force_rescore``). Pending scoring failures are not in that batch.
+  4. Then score the retry tail: stored new jobs that already failed and still
+     have attempts left, oldest first, including ones this scrape did not
+     return. A failure during step 3 waits for a later run. If step 3 stops
+     early, step 4 is left for the next run.
+  5. Persist annotations (required years, experience match, score, skills);
      user status/notified are preserved by storage.upsert_job. Jobs whose
      required experience is outside the window are auto-rejected (status
      ``rejected``) unless the user already triaged them; auto-rejects are
      flagged so the UI separates them from the user's own rejects.
-  5. Prune postings not seen for ``retention_days`` (settings, 0 = never),
+  6. Prune postings not seen for ``retention_days`` (settings, 0 = never),
      export the jobs table to Excel and send Telegram alerts for
      above-threshold matches.
-  6. Record everything on a ``runs`` row.
+  7. Record everything on a ``runs`` row.
 """
 
 import inspect
@@ -272,12 +275,14 @@ def _needs_scoring(row: Optional[Dict[str, Any]], context: PipelineContext) -> b
     if row is None:
         return True
     # A previous AI failure with attempts exhausted is left alone (its error
-    # stays visible in the UI); with attempts left it retries via
-    # needs_score_retry in the run loop.
+    # stays visible in the UI). Attempts still left are not scored here:
+    # the run queues them after fresh postings.
     if (
         row.get("score_error")
         and (row.get("score_attempts") or 0) >= storage.MAX_SCORE_ATTEMPTS
     ):
+        return False
+    if storage.needs_score_retry(row):
         return False
     if row.get("score") is None and row.get("required_years_min") is None:
         return True
@@ -299,6 +304,104 @@ def _needs_scoring(row: Optional[Dict[str, Any]], context: PipelineContext) -> b
     if RESCORE_AFTER_HOURS <= 0:
         return False
     return age > timedelta(hours=RESCORE_AFTER_HOURS)
+
+
+def _score_postings(
+    jobs: List[Tuple[str, Dict[str, Any]]],
+    *,
+    agent: AIJobAgent,
+    context: PipelineContext,
+    report,
+    progress_base: float,
+    progress_span: float,
+) -> Dict[str, Any]:
+    """Score one batch. Returns counts and whether the run should stop.
+
+    Five failures in a row, or three of the same 401/403, set ``stopped``.
+    Jobs not started after that stop do not spend an attempt.
+    """
+    scored = 0
+    failed = 0
+    auto_rejected = 0
+    stopped = False
+    if not jobs or shutdown_requested():
+        return {
+            "scored": scored,
+            "failed": failed,
+            "auto_rejected": auto_rejected,
+            "stopped": stopped,
+        }
+    max_workers = min(context.max_workers or 4, max(1, len(jobs)))
+    failure_streak = 0
+    permanent_status: Optional[int] = None
+    permanent_count = 0
+    stop_scoring = threading.Event()
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_screen_one, agent, job, context, stop_scoring): key
+            for key, job in jobs
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                annotated = future.result()
+            except ScoringSkipped:
+                continue
+            except ScoreFailure as exc:
+                failed += 1
+                failure_streak += 1
+                logger.error("Scoring failed for %s: %s", key, exc)
+                storage.record_score_failure(key, str(exc))
+                if exc.status in PERMANENT_STATUSES:
+                    if exc.status == permanent_status:
+                        permanent_count += 1
+                    else:
+                        permanent_status = exc.status
+                        permanent_count = 1
+                    if permanent_count >= PERMANENT_STOP_AFTER:
+                        stopped = True
+                        stop_scoring.set()
+                else:
+                    permanent_status = None
+                    permanent_count = 0
+                if failure_streak >= FAILURE_STREAK_STOP:
+                    stopped = True
+                    stop_scoring.set()
+                continue
+            except Exception as exc:  # noqa: BLE001 - per-job failure
+                failed += 1
+                failure_streak += 1
+                logger.exception("Screening failed for %s", key)
+                storage.record_score_failure(key, repr(exc))
+                if failure_streak >= FAILURE_STREAK_STOP:
+                    stopped = True
+                    stop_scoring.set()
+                continue
+            failure_streak = 0
+            permanent_status = None
+            permanent_count = 0
+            storage.upsert_job(annotated, job_key_value=key)
+            if annotated.get("auto_rejected") and storage.set_job_status(
+                key, "rejected", only_if_status="new", auto=True
+            ):
+                auto_rejected += 1
+                logger.info(
+                    "Auto-rejected %s — required experience %s is "
+                    "outside the window.",
+                    key,
+                    annotated.get("required_years"),
+                )
+            if annotated.get("score") is not None or annotated.get("verdict"):
+                storage.clear_score_failure(key)
+            scored += 1
+            done = progress_base + progress_span * scored / len(jobs)
+            report(f"Scored {scored}/{len(jobs)}…", min(done, 95))
+    return {
+        "scored": scored,
+        "failed": failed,
+        "auto_rejected": auto_rejected,
+        "stopped": stopped,
+    }
 
 
 def run_pipeline(
@@ -409,10 +512,9 @@ def _execute_pipeline(
         new_count = 0
         to_score: List[Tuple[str, Dict[str, Any]]] = []
         seen_keys: set = set()
-        retry_count = 0
 
         def _persist_batch(jobs: List[Dict[str, Any]]) -> None:
-            nonlocal new_count, retry_count
+            nonlocal new_count
             for raw_job in jobs:
                 safe = make_json_safe(raw_job)
                 key = storage.upsert_job(safe)
@@ -422,10 +524,11 @@ def _execute_pipeline(
                 existing = storage.get_job(key)
                 if existing.get("first_seen_at") == existing.get("last_seen_at"):
                     new_count += 1
-                retrying = storage.needs_score_retry(existing)
-                if retrying:
-                    retry_count += 1
-                if _needs_scoring(existing, context) or retrying:
+                # Pending retries wait until fresh postings in this run are
+                # scored. force_rescore still must not pull them forward.
+                if storage.needs_score_retry(existing):
+                    continue
+                if _needs_scoring(existing, context):
                     to_score.append((key, existing))
 
         result = _scrape(
@@ -453,18 +556,27 @@ def _execute_pipeline(
             _close("failed")
             return summary
 
-        if retry_count:
-            _report(f"{retry_count} failed scoring attempt(s) being retried…", 20)
+        # Snapshot before fresh scoring. Failures from this run are not in
+        # the list, so they wait for a later run.
+        retry_tail = [
+            (job["job_key"], job) for job in storage.jobs_pending_score_retry()
+        ]
+
+        if retry_tail:
+            _report(
+                f"{len(retry_tail)} failed scoring attempt(s) queued after new postings…",
+                20,
+            )
         else:
             _report(f"Persisting {summary['jobs_scraped']} scraped postings…", 10)
 
-        # ---- 3+4. Score fresh postings concurrently ---------------------- #
+        # ---- 3. Score fresh postings, then the retry tail --------------- #
         _report(f"{len(to_score)} postings need scoring…", 25)
         scored_count = 0
         failed_count = 0
         auto_rejected = 0
         stopped_early = False
-        if to_score and not shutdown_requested():
+        if (to_score or retry_tail) and not shutdown_requested():
             agent = AIJobAgent(context.config)
             from .agent.rate_limiter import NVIDIA_RATE_LIMITER
 
@@ -476,77 +588,42 @@ def _execute_pipeline(
                 logger.info(
                     "AI rate limit set to %d calls/minute", context.ai_rate_limit_per_min
                 )
-            max_workers = min(
-                context.max_workers or 4, max(1, len(to_score))
-            )
-            failure_streak = 0
-            permanent_status: Optional[int] = None
-            permanent_count = 0
-            stop_scoring = threading.Event()
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                futures = {
-                    pool.submit(_screen_one, agent, job, context, stop_scoring): key
-                    for key, job in to_score
-                }
-                for future in as_completed(futures):
-                    key = futures[future]
-                    try:
-                        annotated = future.result()
-                    except ScoringSkipped:
-                        continue
-                    except ScoreFailure as exc:
-                        failed_count += 1
-                        failure_streak += 1
-                        logger.error("Scoring failed for %s: %s", key, exc)
-                        storage.record_score_failure(key, str(exc))
-                        if exc.status in PERMANENT_STATUSES:
-                            if exc.status == permanent_status:
-                                permanent_count += 1
-                            else:
-                                permanent_status = exc.status
-                                permanent_count = 1
-                            if permanent_count >= PERMANENT_STOP_AFTER:
-                                stopped_early = True
-                                stop_scoring.set()
-                        else:
-                            permanent_status = None
-                            permanent_count = 0
-                        if failure_streak >= FAILURE_STREAK_STOP:
-                            stopped_early = True
-                            stop_scoring.set()
-                        continue
-                    except Exception as exc:  # noqa: BLE001 - per-job failure
-                        failed_count += 1
-                        failure_streak += 1
-                        logger.exception("Screening failed for %s", key)
-                        storage.record_score_failure(key, repr(exc))
-                        if failure_streak >= FAILURE_STREAK_STOP:
-                            stopped_early = True
-                            stop_scoring.set()
-                        continue
-                    failure_streak = 0
-                    permanent_status = None
-                    permanent_count = 0
-                    storage.upsert_job(annotated, job_key_value=key)
-                    # Auto-reject genuine experience mismatches. only_if
-                    # status='new' keeps the user in charge: an accepted or
-                    # manually rejected posting is never re-classified, and a
-                    # mismatch the user accepted stays accepted.
-                    if annotated.get("auto_rejected") and storage.set_job_status(
-                        key, "rejected", only_if_status="new", auto=True
-                    ):
-                        auto_rejected += 1
-                        logger.info(
-                            "Auto-rejected %s — required experience %s is "
-                            "outside the window.",
-                            key,
-                            annotated.get("required_years"),
-                        )
-                    if annotated.get("score") is not None or annotated.get("verdict"):
-                        storage.clear_score_failure(key)
-                    scored_count += 1
-                    done = 25 + int(70 * scored_count / len(to_score))
-                    _report(f"Scored {scored_count}/{len(to_score)}…", min(done, 95))
+            if to_score:
+                fresh = _score_postings(
+                    to_score,
+                    agent=agent,
+                    context=context,
+                    report=_report,
+                    progress_base=25,
+                    progress_span=50,
+                )
+                scored_count += fresh["scored"]
+                failed_count += fresh["failed"]
+                auto_rejected += fresh["auto_rejected"]
+                stopped_early = fresh["stopped"]
+            if retry_tail and not stopped_early and not shutdown_requested():
+                _report(
+                    f"Retrying {len(retry_tail)} failed scoring attempt(s)…",
+                    75,
+                )
+                retried = _score_postings(
+                    retry_tail,
+                    agent=agent,
+                    context=context,
+                    report=_report,
+                    progress_base=75,
+                    progress_span=20,
+                )
+                scored_count += retried["scored"]
+                failed_count += retried["failed"]
+                auto_rejected += retried["auto_rejected"]
+                stopped_early = stopped_early or retried["stopped"]
+            elif retry_tail and stopped_early:
+                logger.warning(
+                    "Leaving %d scoring retry(s) for the next run after "
+                    "fresh scoring stopped early.",
+                    len(retry_tail),
+                )
         if failed_count:
             logger.warning(
                 "%d job(s) failed AI scoring this run; they retry automatically "

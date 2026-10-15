@@ -59,6 +59,15 @@ def test_needs_scoring_rules(temp_db):
     unscored = {"score": None, "required_years_min": None, "scored_at": None}
     assert _needs_scoring(unscored, context) is True
 
+    # Attempts still left are scored in the retry tail, not the fresh batch.
+    pending_retry = {
+        "score": None,
+        "score_error": "NVIDIA down",
+        "score_attempts": 1,
+        "required_years_min": None,
+    }
+    assert _needs_scoring(pending_retry, context) is False
+
     # Poisoned by the old fake-verdict bug: verdict 'unknown' but no score —
     # must re-score instead of waiting out the rescore window.
     poisoned = {
@@ -191,6 +200,67 @@ def test_failed_scoring_is_recorded_and_retried(temp_db, monkeypatch):
     job = storage.get_job("https://example.com/retry")
     assert job["score"] == 77
     assert job["score_attempts"] == 0 and job["score_error"] is None
+
+
+def test_retry_tail_scores_after_new_postings(temp_db, monkeypatch):
+    """A later run scores the new posting before a leftover failure, even
+    when this scrape did not return the failed job."""
+    _seed_context()
+    storage.set_setting("agent_params", {"max_workers": 1})
+
+    phase = {"run": 1}
+    calls = []
+
+    class OrderAgent:
+        def _estimate_required_years(self, job):
+            calls.append(job.get("title"))
+            if phase["run"] == 1:
+                raise RuntimeError("NVIDIA down")
+            return {"min": 1, "max": 2}
+
+        def assess_suitability(self, job, resume_text):
+            return {
+                "score": 81, "final_score": 81, "verdict": "strong",
+                "matched_skills": ["python"], "missing_skills": [],
+                "reasoning": "ok",
+            }
+
+    class TwoRunScraper:
+        def __init__(self, config):
+            pass
+
+        def scrape(self, progress_callback=None):
+            if phase["run"] == 1:
+                return [{
+                    "title": "Failed Before", "company": "Acme", "site": "linkedin",
+                    "job_url": "https://example.com/failed-before", "description": "d",
+                }]
+            return [{
+                "title": "Fresh Tonight", "company": "Acme", "site": "linkedin",
+                "job_url": "https://example.com/fresh-tonight", "description": "d",
+            }]
+
+    import app.pipeline as pipeline_module
+    monkeypatch.setattr(pipeline_module, "JobScraper", TwoRunScraper)
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: OrderAgent())
+    monkeypatch.setattr(
+        pipeline_module.notify, "notify_above_threshold", lambda *a, **k: 0
+    )
+
+    first = run_pipeline(trigger="manual")
+    assert first["status"] == "degraded"
+    failed = storage.get_job("https://example.com/failed-before")
+    assert failed["score"] is None and failed["score_attempts"] == 1
+
+    calls.clear()
+    phase["run"] = 2
+    second = run_pipeline(trigger="manual")
+    assert second["status"] == "completed" and second["scored"] == 2
+    assert calls == ["Fresh Tonight", "Failed Before"]
+    recovered = storage.get_job("https://example.com/failed-before")
+    assert recovered["score"] == 81
+    assert recovered["score_attempts"] == 0 and recovered["score_error"] is None
+    assert storage.list_jobs(ai_failed=True) == []
 
 
 def test_stale_running_runs_are_reaped(temp_db):

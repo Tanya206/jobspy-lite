@@ -220,20 +220,27 @@ def resume_info() -> ResumeInfo:
 def list_jobs_endpoint(
     status: Optional[str] = None,
     auto_rejected: Optional[bool] = None,
+    ai_failed: bool = False,
     order: str = "score",
     limit: Optional[int] = None,
     offset: int = 0,
 ) -> JobListResponse:
     """List jobs; ``auto_rejected`` narrows rejected rows to the pipeline's
-    experience-window rejects (true) or the operator's own rejects (false)."""
+    experience-window rejects (true) or the operator's own rejects (false).
+
+    ``ai_failed`` returns postings that still have no score after a scoring
+    failure, including ones past the retry cap.
+    """
     if status and status not in ("new", "accepted", "rejected"):
         raise HTTPException(status_code=400, detail="status must be new/accepted/rejected.")
     jobs = storage.list_jobs(
         status=status, limit=limit, offset=offset, order=order,
-        auto_rejected=auto_rejected,
+        auto_rejected=auto_rejected, ai_failed=ai_failed,
     )
     counts = storage.counts_by_status()
-    filtered_total = storage.count_jobs(status=status, auto_rejected=auto_rejected)
+    filtered_total = storage.count_jobs(
+        status=status, auto_rejected=auto_rejected, ai_failed=ai_failed,
+    )
     return JobListResponse(
         count=len(jobs),
         total=counts.get("total", 0),
