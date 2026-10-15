@@ -382,7 +382,63 @@ export default function Dashboard({ onGoJobs }) {
                   />
                 </label>
               </div>
-              <p className="muted small">Model/URL apply from the next run; rate limit and workers apply live. API keys stay in the server .env.</p>
+              <label className="inline">
+                rewrite model
+                <input
+                  className="input" type="text"
+                  placeholder="same as scoring model"
+                  defaultValue={settings.agent_params.rewrite_model ?? ''}
+                  onBlur={(e) => {
+                    const v = e.target.value.trim()
+                    if (v !== (settings.agent_params.rewrite_model ?? '')) {
+                      onSaveSettings({ agent_params: { ...settings.agent_params, rewrite_model: v } })
+                    }
+                  }}
+                />
+              </label>
+              <label className="inline">
+                rewrite base URL
+                <input
+                  className="input" type="text"
+                  placeholder="same as scoring base URL"
+                  defaultValue={settings.agent_params.rewrite_base_url ?? ''}
+                  onBlur={(e) => {
+                    const v = e.target.value.trim()
+                    if (v !== (settings.agent_params.rewrite_base_url ?? '')) {
+                      onSaveSettings({ agent_params: { ...settings.agent_params, rewrite_base_url: v } })
+                    }
+                  }}
+                />
+              </label>
+              <label className="inline">
+                rewrite tries
+                <input
+                  className="input input--num" type="number" min="1" max="5"
+                  defaultValue={settings.agent_params.rewrite_max_tries ?? 3}
+                  onBlur={(e) => {
+                    const v = parseInt(e.target.value, 10)
+                    if (!Number.isNaN(v) && v !== settings.agent_params.rewrite_max_tries) {
+                      onSaveSettings({ agent_params: { ...settings.agent_params, rewrite_max_tries: v } })
+                    }
+                  }}
+                />
+              </label>
+              <label className="stack-field">
+                additional info
+                <textarea
+                  className="apps-notes"
+                  rows={4}
+                  placeholder="Work you have done that is not already on the resume"
+                  defaultValue={settings.additional_info ?? ''}
+                  onBlur={(e) => {
+                    const v = e.target.value
+                    if (v !== (settings.additional_info ?? '')) {
+                      onSaveSettings({ additional_info: v })
+                    }
+                  }}
+                />
+              </label>
+              <p className="muted small">Model/URL apply from the next run; rate limit and workers apply live. Empty rewrite model and base URL use the scoring model. API keys stay in the server .env (REWRITE_API_KEY, else NVIDIA_API_KEY).</p>
             </>
           ) : (
             <Spinner label="Loading settings…" />

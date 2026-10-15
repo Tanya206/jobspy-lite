@@ -44,6 +44,11 @@ class AIClient:
             "ai_base_url",
             os.environ.get("AI_BASE_URL", "https://integrate.api.nvidia.com/v1"),
         )
+        self.base_url = base_url
+        timeout_s = float(config.get("timeout_seconds") or 90.0)
+        # Scoring always shares the NVIDIA limiter. A rewrite pointed at
+        # another host must not take a slot on that limiter.
+        self._rate_limited = bool(config.get("rate_limited", True))
 
         # max_retries=0: the SDK's internal retries bypass our rate limiter,
         # which let bursts exceed NVIDIA's cap (429s). Our parse() retry loop
@@ -56,7 +61,7 @@ class AIClient:
             api_key=api_key or "not-used",
             base_url=base_url,
             max_retries=0,
-            timeout=httpx.Timeout(90.0, connect=15.0),
+            timeout=httpx.Timeout(timeout_s, connect=15.0),
         )
 
     def parse(
@@ -77,7 +82,7 @@ class AIClient:
         last_error = None
 
         for attempt in range(1, MAX_PARSE_ATTEMPTS + 1):
-            waited = NVIDIA_RATE_LIMITER.acquire()
+            waited = NVIDIA_RATE_LIMITER.acquire() if self._rate_limited else 0.0
             if waited > 1.0:
                 logger.info(
                     "%s: waited %.1fs for a rate-limit slot (call %d/%d this window)",

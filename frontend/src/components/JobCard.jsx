@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { formatIstDate } from '../datetime.js'
 import { renderMarkdown } from '../markdown.js'
 import { ScoreGauge } from './ui.jsx'
+import RewritePanel from './RewritePanel.jsx'
 
 function salaryText(job) {
   const { min_amount, max_amount, currency, interval } = job
@@ -140,11 +141,18 @@ function JobDetails({ job, onClose, onStatus }) {
 
 export default function JobCard({ job, onStatus, busy }) {
   const [detailsJob, setDetailsJob] = useState(null)
+  const [rewriteToken, setRewriteToken] = useState(0)
   const salary = salaryText(job)
   const matched = job.matched_skills || []
   const missing = job.missing_skills || []
   const status = job.status || 'new'
   const hasFit = typeof job.score === 'number' || job.verdict || job.reasoning
+
+  async function acceptJob() {
+    const begin = status !== 'accepted'
+    await onStatus(job, 'accepted')
+    if (begin) setRewriteToken((value) => value + 1)
+  }
 
   function openFromTile(event) {
     if (event.target.closest('button, a, input, select, textarea')) return
@@ -165,7 +173,7 @@ export default function JobCard({ job, onStatus, busy }) {
           <button
             className={`btn btn--small ${status === 'accepted' ? 'btn--ok' : ''}`}
             disabled={busy}
-            onClick={() => onStatus(job, 'accepted')}
+            onClick={acceptJob}
             title="Accept this job"
           >
             {status === 'accepted' ? 'Accepted ✓' : 'Accept'}
@@ -253,7 +261,8 @@ export default function JobCard({ job, onStatus, busy }) {
         <button className="link-btn" type="button" onClick={() => setDetailsJob(job)}>
           View details
         </button>
-        {job.first_seen_at ? (
+        {status === 'accepted' ? <RewritePanel job={job} startToken={rewriteToken} /> : null}
+        {job.first_seen_at && status !== 'accepted' ? (
           <span className="card__id">seen {formatIstDate(job.first_seen_at)}</span>
         ) : null}
       </div>

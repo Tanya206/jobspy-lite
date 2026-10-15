@@ -86,6 +86,15 @@ export const getJobs = ({ status, order = 'score', limit = 200, offset = 0, auto
   return getJSON(`/jobs?${q.toString()}`)
 }
 export const getJob = (key) => getJSON(`/jobs/${encodeURIComponent(key)}`)
+export const listRewrites = (key) =>
+  getJSON(`/jobs/${encodeURIComponent(key)}/resume-rewrites`)
+export const startRewrite = (key, body) =>
+  postJSON(`/jobs/${encodeURIComponent(key)}/resume-rewrite`, body)
+export const rewriteDocxUrl = (key, id) => {
+  const token = getToken()
+  const query = token ? `?token=${encodeURIComponent(token)}` : ''
+  return `${BASE}/jobs/${encodeURIComponent(key)}/resume-rewrites/${encodeURIComponent(id)}/docx${query}`
+}
 export const setJobStatus = (key, status) =>
   postJSON(`/jobs/${encodeURIComponent(key)}/status`, { new_status: status })
 export const getApplications = () => getJSON('/applications')

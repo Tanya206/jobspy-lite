@@ -10,6 +10,8 @@ GET  /resume                current resume metadata
 GET  /jobs                  list jobs (status filter, auto/manual reject filter, order, pagination)
 GET  /jobs/{key}            one job with full details
 POST /jobs/{key}/status     accept/reject/reset a job (accept also fills Applications)
+POST /jobs/{key}/resume-rewrite   rewrite the stored resume for one job
+GET  /jobs/{key}/resume-rewrites  past rewrite attempts for one job
 GET  /applications          tracker rows (backfills jobs already accepted)
 POST /applications          add a tracker row by hand
 POST /applications/import   replace the tracker list
@@ -29,6 +31,7 @@ GET  /export.xlsx           download the Excel export
 
 import logging
 import os
+import re
 import secrets
 import threading
 from contextlib import asynccontextmanager
@@ -42,7 +45,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
 from . import notify, scheduler, storage
-from .agent.resume_io import extract_text
+from .agent.resume_io import extract_text, load_resume_docx, save_resume_docx
 from .config import EXCEL_PATH, PROJECT_ROOT, clamp_int
 from .pipeline import PipelineContext, request_shutdown, run_pipeline, wait_for_idle
 from .schemas import (
@@ -54,6 +57,7 @@ from .schemas import (
     JobStatusIn,
     PurgeIn,
     ResumeInfo,
+    RewriteIn,
     RunLatest,
     SchedulerStatus,
     SettingsIn,
@@ -68,6 +72,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """On shutdown, stop taking new scores and wait for the current run."""
+    storage.fail_interrupted_rewrites()
     yield
     request_shutdown()
     wait_for_idle(180)
@@ -187,6 +192,7 @@ async def upload_resume(resume: UploadFile = File(...)) -> ResumeInfo:
     fingerprint = _resume_hash(text)
     from datetime import datetime, timezone
 
+    save_resume_docx(data)
     storage.set_setting(
         "resume",
         {"text": text, "name": resume.filename, "hash": fingerprint,
@@ -233,6 +239,218 @@ def list_jobs_endpoint(
         total=counts.get("total", 0),
         filtered_total=filtered_total,
         jobs=jobs,
+    )
+
+
+def _rewrite_context(job: Dict[str, Any]) -> Dict[str, str]:
+    from .config import EXPERIENCE_MAX_YEARS, EXPERIENCE_MIN_YEARS, scrape_defaults
+
+    min_years = storage.get_setting("experience_min_years", EXPERIENCE_MIN_YEARS)
+    max_years = storage.get_setting("experience_max_years", EXPERIENCE_MAX_YEARS)
+    if max_years is None:
+        years = f"{min_years}+"
+    else:
+        years = f"{min_years}-{max_years}"
+    scrape = {**scrape_defaults(), **(storage.get_setting("scrape_params") or {})}
+    terms = scrape.get("search_terms") or []
+    if isinstance(terms, str):
+        term_text = terms
+    else:
+        term_text = ", ".join(str(item) for item in terms)
+    industry = f"{job.get('title') or ''}. Search terms: {term_text}".strip()
+    return {"years": years, "industry": industry}
+
+
+def _stamp_rewrite(result: Dict[str, Any], applied_rows: list) -> list:
+    """Changes are the whole winning lineage, not only the last try.
+
+    A later try can score higher without new wording. Those earlier patches
+    are still what changed the résumé, so they stay in the list the panel shows.
+    """
+    chain = result.get("patch_chain") or []
+    flat = [patch for group in chain for patch in (group or [])]
+    flags = [bool(row.get("applied")) for row in applied_rows]
+    winner = result.get("winner_try")
+    for row in result.get("trace") or []:
+        row["winner"] = winner is not None and row.get("try") == winner
+    winning: list = []
+    for index, patch in enumerate(flat):
+        applied = flags[index] if index < len(flags) else False
+        winning.append({**patch, "applied": applied})
+    return winning
+
+
+_rewrite_guard = threading.Lock()
+_rewrite_locks: Dict[str, threading.Lock] = {}
+
+
+def _rewrite_lock(job_key: str) -> threading.Lock:
+    with _rewrite_guard:
+        lock = _rewrite_locks.get(job_key)
+        if lock is None:
+            lock = threading.Lock()
+            _rewrite_locks[job_key] = lock
+        return lock
+
+
+def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
+    """Run the loop and fill the row that was inserted as ``running``."""
+    from .agent.resume_io import enforce_one_page
+    from .agent.resume_rewrite import make_client, run_loop
+    from .config import DB_PATH, agent_defaults
+
+    try:
+        job = storage.get_job(job_key)
+        resume = storage.get_setting("resume") or {}
+        resume_text = resume.get("text") or ""
+        agent = {**agent_defaults(), **(storage.get_setting("agent_params") or {})}
+        max_tries = clamp_int(
+            payload.max_tries if payload.max_tries is not None else agent.get("rewrite_max_tries"),
+            1, 5, 3,
+        )
+        additional = (
+            storage.get_setting("additional_info") or ""
+            if payload.additional_info is None
+            else payload.additional_info
+        )
+        context = _rewrite_context(job or {})
+        client = make_client(payload.model or "", payload.base_url or "", agent)
+
+        def complete(messages, text_format, label):
+            return client.parse(messages, text_format, label=label)
+
+        original = load_resume_docx()
+        result = run_loop(
+            resume_text=resume_text,
+            job=job or {},
+            additional_info=additional or "",
+            max_tries=max_tries,
+            complete=complete,
+            years=context["years"],
+            industry=context["industry"],
+            company_type=payload.company_type or "",
+            resume_docx=original,
+        )
+        docx_path = None
+        applied_rows: list = []
+        if original and result.get("patch_chain") and result.get("winning_total") is not None:
+            patched, applied_rows = enforce_one_page(original, result["patch_chain"])
+            if any(row.get("applied") for row in applied_rows):
+                folder = DB_PATH.parent / "rewrites"
+                folder.mkdir(parents=True, exist_ok=True)
+                path = folder / _rewrite_docx_name((job or {}).get("company") or "")
+                path.write_bytes(patched)
+                docx_path = str(path)
+        winning = _stamp_rewrite(result, applied_rows)
+        failed = bool(result.get("error"))
+        storage.update_resume_rewrite(
+            rewrite_id,
+            {
+                "trace": result["trace"],
+                "winning_total": result["winning_total"],
+                "winning_patches": winning,
+                "patch_chain": result["patch_chain"],
+                "docx_path": docx_path,
+                "error": result["error"],
+                "status": "error" if failed else "done",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - the row must leave the running state
+        logger.exception("Resume rewrite failed for %s", job_key)
+        storage.update_resume_rewrite(
+            rewrite_id,
+            {"status": "error", "error": str(exc)},
+        )
+
+
+@app.post("/jobs/{job_key:path}/resume-rewrite", status_code=202)
+def rewrite_resume(job_key: str, payload: RewriteIn) -> Dict[str, Any]:
+    """Start a resume rewrite. The row is filled in when the loop finishes."""
+    import uuid
+
+    from .agent.resume_rewrite import rewrite_target
+    from .config import agent_defaults
+
+    job = storage.get_job(job_key)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job '{job_key}'.")
+    if not (job.get("description") or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="This job has no description to rewrite against.",
+        )
+    resume = storage.get_setting("resume") or {}
+    if not (resume.get("text") or "").strip():
+        raise HTTPException(status_code=400, detail="Upload a resume before rewriting.")
+
+    agent = {**agent_defaults(), **(storage.get_setting("agent_params") or {})}
+    max_tries = clamp_int(
+        payload.max_tries if payload.max_tries is not None else agent.get("rewrite_max_tries"),
+        1, 5, 3,
+    )
+    additional = (
+        storage.get_setting("additional_info") or ""
+        if payload.additional_info is None
+        else payload.additional_info
+    )
+    target = rewrite_target(payload.model or "", payload.base_url or "", agent)
+    with _rewrite_lock(job_key):
+        current = storage.list_resume_rewrites(job_key)
+        if current and current[0].get("status") == "running":
+            return current[0]
+        pending = storage.insert_resume_rewrite(
+            {
+                "id": str(uuid.uuid4()),
+                "job_key": job_key,
+                "model": target["model"],
+                "base_url": target["base_url"],
+                "resume_hash": resume.get("hash"),
+                "max_tries": max_tries,
+                "trace": [],
+                "winning_total": None,
+                "winning_patches": [],
+                "patch_chain": [],
+                "docx_path": None,
+                "error": None,
+                "additional_info": additional or "",
+                "company_type": payload.company_type or "",
+                "status": "running",
+            }
+        )
+    threading.Thread(
+        target=_finish_rewrite,
+        args=(pending["id"], job_key, payload),
+        daemon=True,
+    ).start()
+    return pending
+
+
+@app.get("/jobs/{job_key:path}/resume-rewrites")
+def list_resume_rewrites_endpoint(job_key: str) -> Dict[str, Any]:
+    if storage.get_job(job_key) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job '{job_key}'.")
+    return {"rewrites": storage.list_resume_rewrites(job_key)}
+
+
+def _rewrite_docx_name(company: str) -> str:
+    """Rohil_Chaturvedi_Infosys.docx from the job's company."""
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", (company or "").strip()).strip("_")
+    return f"Rohil_Chaturvedi_{cleaned or 'Company'}.docx"
+
+
+@app.get("/jobs/{job_key:path}/resume-rewrites/{rewrite_id}/docx")
+def download_rewritten_resume(job_key: str, rewrite_id: str) -> FileResponse:
+    row = storage.get_resume_rewrite(rewrite_id)
+    if row is None or row.get("job_key") != job_key or not row.get("docx_path"):
+        raise HTTPException(status_code=404, detail="No patched resume for this attempt.")
+    path = Path(row["docx_path"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Patched resume file is missing.")
+    job = storage.get_job(job_key) or {}
+    return FileResponse(
+        path,
+        filename=_rewrite_docx_name(job.get("company") or ""),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
 
@@ -413,6 +631,7 @@ def get_settings() -> Dict[str, Any]:
         "score_threshold": context.score_threshold,
         "max_workers": context.max_workers,
         "retention_days": context.retention_days,
+        "additional_info": storage.get_setting("additional_info") or "",
     }
 
 
@@ -441,6 +660,10 @@ def update_settings(settings: SettingsIn) -> Dict[str, Any]:
             params["ai_rate_limit_per_min"] = 30
         if "max_workers" in params:
             params["max_workers"] = clamp_int(params.get("max_workers"), 1, 8, 4)
+        params["rewrite_model"] = str(params.get("rewrite_model") or "").strip()
+        params["rewrite_base_url"] = str(params.get("rewrite_base_url") or "").strip()
+        if "rewrite_max_tries" in params:
+            params["rewrite_max_tries"] = clamp_int(params.get("rewrite_max_tries"), 1, 5, 3)
         storage.set_setting("agent_params", params)
     if settings.experience_min_years is not None:
         storage.set_setting("experience_min_years", settings.experience_min_years)
@@ -451,6 +674,8 @@ def update_settings(settings: SettingsIn) -> Dict[str, Any]:
     if settings.retention_days is not None:
         # 0 = keep everything; negative values are clamped to 0.
         storage.set_setting("retention_days", max(0, int(settings.retention_days)))
+    if "additional_info" in settings.model_fields_set:
+        storage.set_setting("additional_info", settings.additional_info or "")
     return get_settings()
 
 

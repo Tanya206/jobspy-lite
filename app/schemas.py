@@ -67,6 +67,18 @@ class SettingsIn(BaseModel):
     score_threshold: Optional[int] = None
     # 0 = keep everything; N = delete postings not seen in N days each run.
     retention_days: Optional[int] = None
+    # Work the candidate has done that is not already on the resume.
+    additional_info: Optional[str] = None
+
+
+class RewriteIn(BaseModel):
+    """One rewrite attempt. Empty model or base URL uses the scoring model."""
+
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    max_tries: Optional[int] = None
+    company_type: Optional[str] = None
+    additional_info: Optional[str] = None
 
 
 class JobStatusIn(BaseModel):

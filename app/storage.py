@@ -109,6 +109,27 @@ CREATE TABLE IF NOT EXISTS application_dismissals (
     job_key      TEXT PRIMARY KEY,
     dismissed_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS resume_rewrites (
+    id              TEXT PRIMARY KEY,
+    job_key         TEXT NOT NULL,
+    model           TEXT,
+    base_url        TEXT,
+    resume_hash     TEXT,
+    created_at      TEXT NOT NULL,
+    max_tries       INTEGER,
+    trace           TEXT,
+    winning_total   INTEGER,
+    winning_patches TEXT,
+    patch_chain     TEXT,
+    docx_path       TEXT,
+    error           TEXT,
+    additional_info TEXT,
+    company_type    TEXT,
+    status          TEXT NOT NULL DEFAULT 'done'
+);
+
+CREATE INDEX IF NOT EXISTS idx_resume_rewrites_job ON resume_rewrites(job_key);
 """
 
 
@@ -163,6 +184,36 @@ def _migrate() -> None:
     ):
         if name not in run_cols:
             _conn.execute(ddl)
+    _conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resume_rewrites (
+            id              TEXT PRIMARY KEY,
+            job_key         TEXT NOT NULL,
+            model           TEXT,
+            base_url        TEXT,
+            resume_hash     TEXT,
+            created_at      TEXT NOT NULL,
+            max_tries       INTEGER,
+            trace           TEXT,
+            winning_total   INTEGER,
+            winning_patches TEXT,
+            patch_chain     TEXT,
+            docx_path       TEXT,
+            error           TEXT,
+            additional_info TEXT,
+            company_type    TEXT,
+            status          TEXT NOT NULL DEFAULT 'done'
+        )
+        """
+    )
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_resume_rewrites_job ON resume_rewrites(job_key)"
+    )
+    rewrite_cols = {row["name"] for row in _conn.execute("PRAGMA table_info(resume_rewrites)")}
+    if "status" not in rewrite_cols:
+        _conn.execute(
+            "ALTER TABLE resume_rewrites ADD COLUMN status TEXT NOT NULL DEFAULT 'done'"
+        )
     # One-time backfill for rows written before auto/manual was tracked:
     # rejected rows the pipeline flagged as experience mismatches are the
     # auto-rejected ones. Runs once (guarded by a settings row) because a
@@ -1001,6 +1052,113 @@ def replace_applications(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "SELECT * FROM applications ORDER BY date_added DESC, id DESC"
         ).fetchall()
         return [_application_public(row) for row in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Resume rewrites (one row per attempt; the scoring resume is not replaced)
+# --------------------------------------------------------------------------- #
+def _decode_rewrite(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if row is None:
+        return None
+    item = dict(row)
+    for column in ("trace", "winning_patches", "patch_chain"):
+        try:
+            item[column] = json.loads(item[column]) if item.get(column) else []
+        except (TypeError, json.JSONDecodeError):
+            item[column] = []
+    item["docx_ready"] = bool(item.get("docx_path"))
+    item["status"] = item.get("status") or "done"
+    return item
+
+
+def insert_resume_rewrite(record: Dict[str, Any]) -> Dict[str, Any]:
+    rewrite_id = record.get("id") or str(uuid.uuid4())
+    created = record.get("created_at") or _utc_now()
+    with transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO resume_rewrites (
+                id, job_key, model, base_url, resume_hash, created_at, max_tries,
+                trace, winning_total, winning_patches, patch_chain, docx_path,
+                error, additional_info, company_type, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rewrite_id,
+                record.get("job_key"),
+                record.get("model"),
+                record.get("base_url"),
+                record.get("resume_hash"),
+                created,
+                record.get("max_tries"),
+                json.dumps(make_json_safe(record.get("trace") or []), ensure_ascii=False),
+                record.get("winning_total"),
+                json.dumps(make_json_safe(record.get("winning_patches") or []), ensure_ascii=False),
+                json.dumps(make_json_safe(record.get("patch_chain") or []), ensure_ascii=False),
+                record.get("docx_path"),
+                record.get("error"),
+                record.get("additional_info") or "",
+                record.get("company_type") or "",
+                record.get("status") or "done",
+            ),
+        )
+    found = get_resume_rewrite(rewrite_id)
+    assert found is not None
+    return found
+
+
+def update_resume_rewrite(rewrite_id: str, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Fill in a rewrite row after the background run finishes."""
+    json_columns = {"trace", "winning_patches", "patch_chain"}
+    allowed = json_columns | {
+        "model", "base_url", "resume_hash", "max_tries", "winning_total",
+        "docx_path", "error", "additional_info", "company_type", "status",
+    }
+    assignments: List[str] = []
+    params: List[Any] = []
+    for key, value in record.items():
+        if key not in allowed:
+            continue
+        if key in json_columns:
+            value = json.dumps(make_json_safe(value or []), ensure_ascii=False)
+        assignments.append(f"{key} = ?")
+        params.append(value)
+    if not assignments:
+        return get_resume_rewrite(rewrite_id)
+    params.append(rewrite_id)
+    with transaction() as conn:
+        conn.execute(
+            f"UPDATE resume_rewrites SET {', '.join(assignments)} WHERE id = ?",
+            params,
+        )
+    return get_resume_rewrite(rewrite_id)
+
+
+def fail_interrupted_rewrites() -> int:
+    """A restart kills the background thread, so a running row can never finish."""
+    with transaction() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE resume_rewrites
+            SET status = 'error',
+                error = 'Rewrite stopped because the app restarted. Use Rerun rewrite.'
+            WHERE status = 'running'
+            """
+        )
+        return cursor.rowcount
+
+
+def get_resume_rewrite(rewrite_id: str) -> Optional[Dict[str, Any]]:
+    row = query_one("SELECT * FROM resume_rewrites WHERE id = ?", (rewrite_id,))
+    return _decode_rewrite(row)
+
+
+def list_resume_rewrites(job_key_value: str) -> List[Dict[str, Any]]:
+    rows = query(
+        "SELECT * FROM resume_rewrites WHERE job_key = ? ORDER BY created_at DESC",
+        (job_key_value,),
+    )
+    return [item for item in (_decode_rewrite(row) for row in rows) if item]
 
 
 # --------------------------------------------------------------------------- #

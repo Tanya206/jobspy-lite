@@ -128,6 +128,9 @@ def agent_defaults() -> Dict[str, Any]:
         "ai_model": AI_MODEL,
         "ai_base_url": AI_BASE_URL,
         "ai_rate_limit_per_min": AI_RATE_LIMIT_PER_MIN,
+        "rewrite_model": "",
+        "rewrite_base_url": "",
+        "rewrite_max_tries": 3,
     }
 
 

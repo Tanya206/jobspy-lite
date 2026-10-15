@@ -6,6 +6,7 @@ import {
   importApplications,
   updateApplication,
 } from '../api.js'
+import RewritePanel from './RewritePanel.jsx'
 import {
   JOB_STATUSES,
   applicationStats,
@@ -168,6 +169,19 @@ export default function ApplicationsView() {
       ) : (
         <div className="apps-wrap">
           <table className="apps-table">
+            <colgroup>
+              <col className="apps-col-company" />
+              <col className="apps-col-role" />
+              <col className="apps-col-id" />
+              <col className="apps-col-link" />
+              <col className="apps-col-referral" />
+              <col className="apps-col-status" />
+              <col className="apps-col-date" />
+              <col className="apps-col-notes" />
+              <col className="apps-col-messages" />
+              <col className="apps-col-resume" />
+              <col className="apps-col-delete" />
+            </colgroup>
             <thead>
               <tr>
                 <th>Company</th>
@@ -179,7 +193,8 @@ export default function ApplicationsView() {
                 <th>Date applied</th>
                 <th>Notes</th>
                 <th>Messages</th>
-                <th />
+                <th className="apps-resume">Résumé</th>
+                <th className="apps-delete" />
               </tr>
             </thead>
             <tbody>
@@ -333,7 +348,10 @@ function ApplicationRow({ app, overdue, copied, onSave, onCopy, onDelete }) {
           {copied === `${app.id}-mail` ? 'Copied' : 'Email'}
         </button>
       </td>
-      <td>
+      <td className="apps-resume">
+        {app.job_key ? <RewritePanel job={{ job_key: app.job_key, company: app.company }} /> : <span className="muted small">—</span>}
+      </td>
+      <td className="apps-delete">
         <button className="btn btn--small btn--danger" type="button" onClick={() => onDelete(app)}>
           Delete
         </button>
