@@ -7,9 +7,9 @@ import {
 import { formatIst } from '../datetime.js'
 import { ErrorBanner, ProgressBar, Spinner } from './ui.jsx'
 
-function StatCard({ label, value, accent }) {
+function StatCard({ label, value, tone }) {
   return (
-    <div className={`stat-card ${accent ? 'stat-card--accent' : ''}`}>
+    <div className={`stat-card${tone ? ` stat-card--${tone}` : ''}`}>
       <div className="stat-card__value">{value ?? '—'}</div>
       <div className="stat-card__label">{label}</div>
     </div>
@@ -170,12 +170,12 @@ export default function Dashboard({ onGoJobs }) {
       <ErrorBanner error={error} />
 
       <div className="stat-grid">
-        <StatCard label="total jobs" value={stats?.total} />
-        <StatCard label="new" value={stats?.new} accent />
-        <StatCard label="accepted" value={stats?.accepted} />
-        <StatCard label="rejected (manual)" value={stats?.manual_rejected} />
-        <StatCard label="auto-rejected" value={stats?.auto_rejected} />
-        <StatCard label="avg score" value={stats?.avg_score} />
+        <StatCard label="total jobs" value={stats?.total} tone="accent" />
+        <StatCard label="new" value={stats?.new} tone="info" />
+        <StatCard label="accepted" value={stats?.accepted} tone="ok" />
+        <StatCard label="rejected (manual)" value={stats?.manual_rejected} tone="no" />
+        <StatCard label="auto-rejected" value={stats?.auto_rejected} tone="warn" />
+        <StatCard label="avg score" value={stats?.avg_score} tone="accent" />
       </div>
 
       <div className="panel-grid">

@@ -116,6 +116,29 @@ def test_rejected_filter_split_and_filtered_total(client):
     assert stats["manual_rejected"] == 1
 
 
+def test_recent_order_excludes_rejected_before_limit(client):
+    """The jobs board asks for a page with rejected rows removed first, so
+    recency does not return a shorter list than score or title."""
+    from app import storage
+
+    keep = storage.upsert_job({"job_url": "https://x/keep", "title": "Keep", "score": 80})
+    for i in range(3):
+        key = storage.upsert_job({"job_url": f"https://x/rej-{i}", "title": f"Rej {i}", "score": 10})
+        storage.set_job_status(key, "rejected", auto=True)
+    with storage.transaction() as conn:
+        conn.execute("UPDATE jobs SET last_seen_at = ? WHERE job_key = ?", ("2026-01-01T00:00:00+00:00", keep))
+        conn.execute("UPDATE jobs SET last_seen_at = ? WHERE status = 'rejected'", ("2026-10-01T00:00:00+00:00",))
+
+    recent = client.get("/jobs?order=recent&limit=2&exclude_status=rejected").json()
+    score = client.get("/jobs?order=score&limit=2&exclude_status=rejected").json()
+    assert recent["filtered_total"] == score["filtered_total"] == 1
+    assert [job["job_key"] for job in recent["jobs"]] == [keep]
+    assert [job["job_key"] for job in score["jobs"]] == [keep]
+
+    bad = client.get("/jobs?exclude_status=banana")
+    assert bad.status_code == 400
+
+
 def test_scheduler_config_validation(client):
     # Invalid mode rejected.
     bad = client.post("/scheduler/config", json={"mode": "weekly"})

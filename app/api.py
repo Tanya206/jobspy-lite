@@ -224,22 +224,30 @@ def list_jobs_endpoint(
     order: str = "score",
     limit: Optional[int] = None,
     offset: int = 0,
+    exclude_status: Optional[str] = None,
 ) -> JobListResponse:
     """List jobs; ``auto_rejected`` narrows rejected rows to the pipeline's
     experience-window rejects (true) or the operator's own rejects (false).
 
     ``ai_failed`` returns postings that still have no score after a scoring
     failure, including ones past the retry cap.
+
+    ``exclude_status`` is applied before ``limit``, so a page of active jobs
+    is not crowded out by rejected ones.
     """
     if status and status not in ("new", "accepted", "rejected"):
         raise HTTPException(status_code=400, detail="status must be new/accepted/rejected.")
+    if exclude_status and exclude_status not in ("new", "accepted", "rejected"):
+        raise HTTPException(status_code=400, detail="exclude_status must be new/accepted/rejected.")
     jobs = storage.list_jobs(
         status=status, limit=limit, offset=offset, order=order,
         auto_rejected=auto_rejected, ai_failed=ai_failed,
+        exclude_status=exclude_status,
     )
     counts = storage.counts_by_status()
     filtered_total = storage.count_jobs(
         status=status, auto_rejected=auto_rejected, ai_failed=ai_failed,
+        exclude_status=exclude_status,
     )
     return JobListResponse(
         count=len(jobs),

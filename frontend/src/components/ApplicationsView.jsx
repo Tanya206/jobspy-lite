@@ -126,10 +126,10 @@ export default function ApplicationsView() {
     <section>
       <p className="eyebrow">Applications</p>
       <div className="stat-grid">
-        <Stat label="Total" value={stats.total} />
-        <Stat label="Interviews" value={stats.interviews} />
-        <Stat label="Offers" value={stats.offers} />
-        <Stat label="Overdue" value={stats.overdue} accent={stats.overdue > 0} />
+        <Stat label="Total" value={stats.total} tone="accent" />
+        <Stat label="Interviews" value={stats.interviews} tone="info" />
+        <Stat label="Offers" value={stats.offers} tone="ok" />
+        <Stat label="Overdue" value={stats.overdue} tone={stats.overdue > 0 ? 'warn' : undefined} />
       </div>
       <div className="toolbar">
         <button className="btn btn--primary" type="button" onClick={addRow} disabled={busy}>
@@ -217,13 +217,17 @@ export default function ApplicationsView() {
   )
 }
 
-function Stat({ label, value, accent = false }) {
+function Stat({ label, value, tone }) {
   return (
-    <div className={`stat-card ${accent ? 'stat-card--accent' : ''}`}>
+    <div className={`stat-card${tone ? ` stat-card--${tone}` : ''}`}>
       <div className="stat-card__value">{value}</div>
       <div className="stat-card__label">{label}</div>
     </div>
   )
+}
+
+function statusTone(status) {
+  return String(status || '').trim().toLowerCase().replace(/\s+/g, '-')
 }
 
 async function writeClipboard(text) {
@@ -256,9 +260,10 @@ function ApplicationRow({ app, overdue, copied, onSave, onCopy, onDelete }) {
 
   const referralText = generateReferralMessage(app)
   const emailText = formatEmailForClipboard(generateEmailMessage(app))
+  const tone = statusTone(app.status)
 
   return (
-    <tr className={overdue ? 'apps-row--overdue' : undefined}>
+    <tr className={['apps-row', tone && `apps-row--${tone}`, overdue && 'apps-row--overdue'].filter(Boolean).join(' ')}>
       <td>
         <input
           className="input"
@@ -308,17 +313,19 @@ function ApplicationRow({ app, overdue, copied, onSave, onCopy, onDelete }) {
         </select>
       </td>
       <td>
-        <select
-          className="select"
-          aria-label="Status"
-          value={app.status || ''}
-          onChange={(event) => onSave(app.id, { status: event.target.value })}
-        >
-          <option value="">—</option>
-          {JOB_STATUSES.map((option) => (
-            <option key={option} value={option}>{option}</option>
-          ))}
-        </select>
+        <div className={`status-field${tone ? ` status-field--${tone}` : ''}`}>
+          <select
+            className={`select${tone ? ` select--${tone}` : ''}`}
+            aria-label="Status"
+            value={app.status || ''}
+            onChange={(event) => onSave(app.id, { status: event.target.value })}
+          >
+            <option value="">—</option>
+            {JOB_STATUSES.map((option) => (
+              <option key={option} value={option}>{option}</option>
+            ))}
+          </select>
+        </div>
         {overdue ? <div className="badge badge--warn">overdue</div> : null}
       </td>
       <td>

@@ -423,6 +423,7 @@ def _status_filter(
     status: Optional[str],
     auto_rejected: Optional[bool],
     ai_failed: bool = False,
+    exclude_status: Optional[str] = None,
 ) -> Tuple[str, List[Any]]:
     """WHERE clause fragment (leading ' WHERE ' when non-empty) + params."""
     clauses: List[str] = []
@@ -430,6 +431,9 @@ def _status_filter(
     if status:
         clauses.append("status = ?")
         params.append(status)
+    if exclude_status:
+        clauses.append("status != ?")
+        params.append(exclude_status)
     if auto_rejected is not None:
         clauses.append("auto_rejected = ?")
         params.append(1 if auto_rejected else 0)
@@ -446,9 +450,10 @@ def count_jobs(
     status: Optional[str] = None,
     auto_rejected: Optional[bool] = None,
     ai_failed: bool = False,
+    exclude_status: Optional[str] = None,
 ) -> int:
     """Number of jobs matching the filter, ignoring pagination."""
-    where, params = _status_filter(status, auto_rejected, ai_failed)
+    where, params = _status_filter(status, auto_rejected, ai_failed, exclude_status)
     row = query_one(f"SELECT COUNT(*) AS n FROM jobs{where}", tuple(params))
     return row["n"] if row else 0
 
@@ -460,6 +465,7 @@ def list_jobs(
     order: str = "score",
     auto_rejected: Optional[bool] = None,
     ai_failed: bool = False,
+    exclude_status: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Jobs as dicts, newest-first within equal scores, with parsed skills.
 
@@ -469,10 +475,19 @@ def list_jobs(
 
     ``ai_failed`` keeps rows whose score is still empty after at least one
     scoring failure, including rows past the retry cap.
+
+    ``exclude_status`` drops a status before ``limit`` is applied. The board
+    needs this for rejected rows: they are loaded separately, and leaving
+    them in this query lets a recency page fill up with rejects and hide
+    the jobs the board actually shows.
     """
-    allowed_orders = {"score": "score DESC", "recent": "last_seen_at DESC", "title": "title ASC"}
+    allowed_orders = {
+        "score": "score DESC, last_seen_at DESC",
+        "recent": "last_seen_at DESC, first_seen_at DESC",
+        "title": "title ASC, last_seen_at DESC",
+    }
     order_clause = allowed_orders.get(order, allowed_orders["score"])
-    where, params = _status_filter(status, auto_rejected, ai_failed)
+    where, params = _status_filter(status, auto_rejected, ai_failed, exclude_status)
     sql = f"SELECT * FROM jobs{where} ORDER BY {order_clause}"
     if limit is not None:
         sql += " LIMIT ? OFFSET ?"

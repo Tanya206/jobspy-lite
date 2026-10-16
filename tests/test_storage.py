@@ -239,6 +239,33 @@ def test_stale_failure_marks_cleaned_at_connect(temp_db):
     assert failed["score_error"] == "NVIDIA down"  # real failure untouched
 
 
+def test_recent_page_skips_rejected_before_limit(temp_db):
+    """Rejected rows are the newest after a scrape. A recency page that
+    counts them uses up its limit and hides older jobs the board still shows."""
+    keep_old = storage.upsert_job(_job("keep-old", score=80))
+    keep_new = storage.upsert_job(_job("keep-new", score=70))
+    rejected = [storage.upsert_job(_job(f"rej-{i}", score=10)) for i in range(5)]
+    for key in rejected:
+        storage.set_job_status(key, "rejected", auto=True)
+    with storage.transaction() as conn:
+        conn.execute(
+            "UPDATE jobs SET last_seen_at = ? WHERE job_key = ?",
+            ("2026-01-01T00:00:00+00:00", keep_old),
+        )
+        conn.execute(
+            "UPDATE jobs SET last_seen_at = ? WHERE job_key = ?",
+            ("2026-06-01T00:00:00+00:00", keep_new),
+        )
+        conn.executemany(
+            "UPDATE jobs SET last_seen_at = ? WHERE job_key = ?",
+            [("2026-10-01T00:00:00+00:00", key) for key in rejected],
+        )
+
+    page = storage.list_jobs(order="recent", limit=2, exclude_status="rejected")
+    assert [job["job_key"] for job in page] == [keep_new, keep_old]
+    assert storage.count_jobs(exclude_status="rejected") == 2
+
+
 def test_ai_failed_list_is_not_hidden_by_score_order(temp_db):
     """A null score sorts after every scored job, so the board page misses it.
     The ai_failed filter returns that row and skips a scored row that still

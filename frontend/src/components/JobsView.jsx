@@ -31,10 +31,13 @@ export default function JobsView() {
     setError(null)
     try {
       const [data, rejectedData, failedData] = await Promise.all([
-        getJobs({ order }),
+        // Rejected rows have their own section, and this list is not paged.
+        // A page taken after sorting let recency fill up with rejects and
+        // show fewer jobs than score or title.
+        getJobs({ order, excludeStatus: 'rejected', limit: null }),
         // Rejected includes both manual rejects and pipeline auto-rejects.
         getJobs({ status: 'rejected', order, limit: REJECTED_PAGE }),
-        getJobs({ aiFailed: true, order: 'recent', limit: REJECTED_PAGE }),
+        getJobs({ aiFailed: true, excludeStatus: 'rejected', order: 'recent', limit: null }),
       ])
       const failed = (failedData.jobs || []).filter((j) => (j.status || 'new') !== 'rejected')
       const seen = new Set((data.jobs || []).map((j) => j.job_key))
