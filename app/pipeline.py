@@ -20,6 +20,7 @@ Sequence (each run, cron or manual):
   7. Record everything on a ``runs`` row.
 """
 
+import contextvars
 import inspect
 import logging
 import os
@@ -32,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import notify, storage
 from .agent.ai_job_agent import AIJobAgent
 from .agent.observability import AI_METRICS
+from .agent.tracing import annotate_pipeline, pipeline_span
 from .config import clamp_int
 from .scraper import JobScraper, ScrapeResult
 from .util import make_json_safe
@@ -337,8 +339,13 @@ def _score_postings(
     permanent_count = 0
     stop_scoring = threading.Event()
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        # Workers do not inherit contextvars. Copy the run's trace context
+        # so each model call stays a child of this pipeline span.
         futures = {
-            pool.submit(_screen_one, agent, job, context, stop_scoring): key
+            pool.submit(
+                contextvars.copy_context().run,
+                _screen_one, agent, job, context, stop_scoring,
+            ): key
             for key, job in jobs
         }
         for future in as_completed(futures):
@@ -468,6 +475,8 @@ def _execute_pipeline(
             progress_callback(message, percent)
 
     AI_METRICS.reset()
+    _trace = pipeline_span(run_id, trigger)
+    trace_span = _trace.__enter__()
 
     def _close(status: str) -> None:
         metrics = AI_METRICS.snapshot()
@@ -699,5 +708,7 @@ def _execute_pipeline(
         _close("failed")
     finally:
         summary["duration_s"] = round(time.monotonic() - started, 1)
+        annotate_pipeline(trace_span, summary)
+        _trace.__exit__(None, None, None)
 
     return summary

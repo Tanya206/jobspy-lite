@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from .observability import AI_METRICS
 from .rate_limiter import NVIDIA_RATE_LIMITER
+from .tracing import finish_parse, note_parse_attempt, parse_span
 
 
 logger = logging.getLogger(__name__)
@@ -81,60 +82,77 @@ class AIClient:
         """
         last_error = None
 
-        for attempt in range(1, MAX_PARSE_ATTEMPTS + 1):
-            waited = NVIDIA_RATE_LIMITER.acquire() if self._rate_limited else 0.0
-            if waited > 1.0:
-                logger.info(
-                    "%s: waited %.1fs for a rate-limit slot (call %d/%d this window)",
-                    label, waited, NVIDIA_RATE_LIMITER.recent_count(),
-                    NVIDIA_RATE_LIMITER.max_calls,
-                )
-            started = time.monotonic()
-            try:
-                response = self._client.beta.chat.completions.parse(
-                    model=self.ai_model,
-                    messages=messages,
-                    response_format=text_format,
-                    temperature=temperature,
-                )
-                AI_METRICS.record_attempt(time.monotonic() - started)
-                message = response.choices[0].message
-                parsed = message.parsed
-                if parsed is None:
-                    refusal = getattr(message, "refusal", None)
-                    detail = f"AI returned no structured {text_format.__name__} response"
-                    if refusal:
-                        detail += f": {refusal}"
-                    raise ValueError(detail)
-                # Validate even when the SDK returns a model instance. This
-                # keeps the retry policy responsible for every bad response.
-                result = text_format.model_validate(parsed)
-                if attempt > 1:
-                    logger.info("%s: succeeded on attempt %d/%d", label, attempt, MAX_PARSE_ATTEMPTS)
-                AI_METRICS.record_call(True)
-                return result
-            except Exception as exc:
-                last_error = exc
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                AI_METRICS.record_attempt(time.monotonic() - started, status)
-                permanent = status is not None and status not in RETRYABLE_STATUS_CODES
-                if attempt == MAX_PARSE_ATTEMPTS or permanent:
-                    logger.error(
-                        "%s: FAILED after %d attempts%s: %s",
-                        label, attempt, " (permanent error)" if permanent else "", exc,
+        # One child span for the whole retry loop. Dropped when no pipeline
+        # or rewrite root is open, so a stray call is not its own trace.
+        with parse_span(label, self.ai_model) as span:
+            for attempt in range(1, MAX_PARSE_ATTEMPTS + 1):
+                waited = NVIDIA_RATE_LIMITER.acquire() if self._rate_limited else 0.0
+                if waited > 1.0:
+                    logger.info(
+                        "%s: waited %.1fs for a rate-limit slot (call %d/%d this window)",
+                        label, waited, NVIDIA_RATE_LIMITER.recent_count(),
+                        NVIDIA_RATE_LIMITER.max_calls,
                     )
-                    AI_METRICS.record_call(False, str(exc))
-                    break
-                delay = min(
-                    INITIAL_RETRY_DELAY_SECONDS * (2 ** (attempt - 1)),
-                    MAX_RETRY_DELAY_SECONDS,
-                )
-                delay += random.uniform(0, delay / 2)  # jitter: spread retries out
-                logger.warning(
-                    "%s: attempt %d/%d failed (%s); retrying in %.1fs",
-                    label, attempt, MAX_PARSE_ATTEMPTS,
-                    f"HTTP {status}" if status else exc, delay,
-                )
-                time.sleep(delay)
+                started = time.monotonic()
+                try:
+                    response = self._client.beta.chat.completions.parse(
+                        model=self.ai_model,
+                        messages=messages,
+                        response_format=text_format,
+                        temperature=temperature,
+                    )
+                    AI_METRICS.record_attempt(time.monotonic() - started)
+                    message = response.choices[0].message
+                    parsed = message.parsed
+                    if parsed is None:
+                        refusal = getattr(message, "refusal", None)
+                        detail = f"AI returned no structured {text_format.__name__} response"
+                        if refusal:
+                            detail += f": {refusal}"
+                        raise ValueError(detail)
+                    # Validate even when the SDK returns a model instance. This
+                    # keeps the retry policy responsible for every bad response.
+                    result = text_format.model_validate(parsed)
+                    if attempt > 1:
+                        logger.info("%s: succeeded on attempt %d/%d", label, attempt, MAX_PARSE_ATTEMPTS)
+                    AI_METRICS.record_call(True)
+                    finish_parse(
+                        span,
+                        ok=True,
+                        attempts=attempt,
+                        usage=getattr(response, "usage", None),
+                    )
+                    return result
+                except Exception as exc:
+                    last_error = exc
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    AI_METRICS.record_attempt(time.monotonic() - started, status)
+                    note_parse_attempt(span, attempt, status, str(exc))
+                    permanent = status is not None and status not in RETRYABLE_STATUS_CODES
+                    if attempt == MAX_PARSE_ATTEMPTS or permanent:
+                        logger.error(
+                            "%s: FAILED after %d attempts%s: %s",
+                            label, attempt, " (permanent error)" if permanent else "", exc,
+                        )
+                        AI_METRICS.record_call(False, str(exc))
+                        finish_parse(
+                            span,
+                            ok=False,
+                            attempts=attempt,
+                            http_status=status,
+                            error=str(exc),
+                        )
+                        break
+                    delay = min(
+                        INITIAL_RETRY_DELAY_SECONDS * (2 ** (attempt - 1)),
+                        MAX_RETRY_DELAY_SECONDS,
+                    )
+                    delay += random.uniform(0, delay / 2)  # jitter: spread retries out
+                    logger.warning(
+                        "%s: attempt %d/%d failed (%s); retrying in %.1fs",
+                        label, attempt, MAX_PARSE_ATTEMPTS,
+                        f"HTTP {status}" if status else exc, delay,
+                    )
+                    time.sleep(delay)
 
-        raise last_error
+            raise last_error

@@ -150,6 +150,12 @@ All via `.env` (see `.env.example`); scrape params, experience window, and the
 score threshold can also be changed at runtime from the dashboard (stored in
 the `settings` table and applied from the next run).
 
+## Traces
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export OpenTelemetry traces. Each pipeline run is one trace, and each resume rewrite is another. Agent model calls are child spans of whichever trace is open (`experience`, `fit`, `checker`, or `other`). Prompts and resume text are not included. Leave the endpoint unset and nothing is exported.
+
+Langfuse accepts this export. Point the endpoint at `https://cloud.langfuse.com/api/public/otel` (or a self-hosted `/api/public/otel`) and set `OTEL_EXPORTER_OTLP_HEADERS` to `Authorization=Basic` plus the base64 of `public_key:secret_key`. Any other OTLP HTTP collector uses the same two variables.
+
 ## Tests
 
 ```bash

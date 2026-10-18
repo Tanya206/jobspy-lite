@@ -22,6 +22,7 @@ for _path in (str(PROJECT_ROOT),):
         sys.path.insert(0, _path)
 
 from app import scheduler, storage  # noqa: E402
+from app.agent.tracing import setup_tracing, shutdown_tracing  # noqa: E402
 from app.pipeline import run_pipeline  # noqa: E402
 
 
@@ -47,11 +48,15 @@ def main() -> None:
     parser.add_argument("--force-rescore", action="store_true",
                         help="re-score every job even if cached")
     args = parser.parse_args()
+    setup_tracing()
 
     if args.once:
-        summary = run_pipeline(trigger="manual", force_rescore=args.force_rescore)
-        _print_summary(summary)
-        storage.close()
+        try:
+            summary = run_pipeline(trigger="manual", force_rescore=args.force_rescore)
+            _print_summary(summary)
+        finally:
+            shutdown_tracing()
+            storage.close()
         return
 
     if args.serve:

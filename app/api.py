@@ -46,6 +46,7 @@ from starlette.requests import Request
 
 from . import notify, scheduler, storage
 from .agent.resume_io import extract_text, load_resume_docx, save_resume_docx
+from .agent.tracing import finish_rewrite, rewrite_span, setup_tracing, shutdown_tracing
 from .config import EXCEL_PATH, PROJECT_ROOT, clamp_int
 from .pipeline import PipelineContext, request_shutdown, run_pipeline, wait_for_idle
 from .schemas import (
@@ -73,9 +74,11 @@ logger = logging.getLogger(__name__)
 async def _lifespan(_app: FastAPI):
     """On shutdown, stop taking new scores and wait for the current run."""
     storage.fail_interrupted_rewrites()
+    setup_tracing()
     yield
     request_shutdown()
     wait_for_idle(180)
+    shutdown_tracing()
 
 
 app = FastAPI(
@@ -85,6 +88,11 @@ app = FastAPI(
     "schedule, and get Telegram alerts for the best matches.",
     lifespan=_lifespan,
 )
+
+# uvicorn app.api:app (Docker) never passes through cli.main. Import-time
+# setup covers that path; cli.main calls it again, and both are no-ops once
+# a provider exists. The lifespan flushes on shutdown.
+setup_tracing()
 
 app.add_middleware(
     CORSMiddleware,
@@ -335,41 +343,44 @@ def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
             return client.parse(messages, text_format, label=label)
 
         original = load_resume_docx()
-        result = run_loop(
-            resume_text=resume_text,
-            job=job or {},
-            additional_info=additional or "",
-            max_tries=max_tries,
-            complete=complete,
-            years=context["years"],
-            industry=context["industry"],
-            company_type=payload.company_type or "",
-            resume_docx=original,
-        )
-        docx_path = None
-        applied_rows: list = []
-        if original and result.get("patch_chain") and result.get("winning_total") is not None:
-            patched, applied_rows = enforce_one_page(original, result["patch_chain"])
-            if any(row.get("applied") for row in applied_rows):
-                folder = DB_PATH.parent / "rewrites"
-                folder.mkdir(parents=True, exist_ok=True)
-                path = folder / _rewrite_docx_name((job or {}).get("company") or "")
-                path.write_bytes(patched)
-                docx_path = str(path)
-        winning = _stamp_rewrite(result, applied_rows)
-        failed = bool(result.get("error"))
-        storage.update_resume_rewrite(
-            rewrite_id,
-            {
-                "trace": result["trace"],
-                "winning_total": result["winning_total"],
-                "winning_patches": winning,
-                "patch_chain": result["patch_chain"],
-                "docx_path": docx_path,
-                "error": result["error"],
-                "status": "error" if failed else "done",
-            },
-        )
+        with rewrite_span(rewrite_id, job_key, max_tries) as trace_span:
+            result = run_loop(
+                resume_text=resume_text,
+                job=job or {},
+                additional_info=additional or "",
+                max_tries=max_tries,
+                complete=complete,
+                years=context["years"],
+                industry=context["industry"],
+                company_type=payload.company_type or "",
+                resume_docx=original,
+            )
+            docx_path = None
+            applied_rows: list = []
+            if original and result.get("patch_chain") and result.get("winning_total") is not None:
+                patched, applied_rows = enforce_one_page(original, result["patch_chain"])
+                if any(row.get("applied") for row in applied_rows):
+                    folder = DB_PATH.parent / "rewrites"
+                    folder.mkdir(parents=True, exist_ok=True)
+                    path = folder / _rewrite_docx_name((job or {}).get("company") or "")
+                    path.write_bytes(patched)
+                    docx_path = str(path)
+            winning = _stamp_rewrite(result, applied_rows)
+            failed = bool(result.get("error"))
+            status = "error" if failed else "done"
+            storage.update_resume_rewrite(
+                rewrite_id,
+                {
+                    "trace": result["trace"],
+                    "winning_total": result["winning_total"],
+                    "winning_patches": winning,
+                    "patch_chain": result["patch_chain"],
+                    "docx_path": docx_path,
+                    "error": result["error"],
+                    "status": status,
+                },
+            )
+            finish_rewrite(trace_span, status)
     except Exception as exc:  # noqa: BLE001 - the row must leave the running state
         logger.exception("Resume rewrite failed for %s", job_key)
         storage.update_resume_rewrite(
