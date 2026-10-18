@@ -12,9 +12,11 @@ from app.agent.ai_client import AIClient
 from app.agent.tracing import (
     annotate_pipeline,
     install_span_exporter,
+    otlp_headers,
     pipeline_span,
     setup_tracing,
     shutdown_tracing,
+    traces_endpoint,
     tracing_enabled,
 )
 
@@ -208,6 +210,30 @@ def test_orphan_parse_is_dropped(monkeypatch):
         label="experience[Role @ Co]",
     )
     assert exporter.get_finished_spans() == []
+
+
+def test_langfuse_host_uses_the_otel_path():
+    assert traces_endpoint("https://us.cloud.langfuse.com") == (
+        "https://us.cloud.langfuse.com/api/public/otel/v1/traces"
+    )
+    assert traces_endpoint("https://us.cloud.langfuse.com/api/public/otel") == (
+        "https://us.cloud.langfuse.com/api/public/otel/v1/traces"
+    )
+    assert traces_endpoint("http://localhost:4318") == "http://localhost:4318/v1/traces"
+
+
+def test_raw_langfuse_basic_token_is_encoded():
+    import base64
+
+    headers = otlp_headers("Authorization=Basic pk-lf-abc:sk-lf-def")
+    assert headers is not None
+    scheme, token = headers["Authorization"].split(" ", 1)
+    assert scheme == "Basic"
+    assert base64.b64decode(token).decode() == "pk-lf-abc:sk-lf-def"
+    already = base64.b64encode(b"pk-lf-abc:sk-lf-def").decode()
+    assert otlp_headers(f"Authorization=Basic {already}")["Authorization"] == (
+        f"Basic {already}"
+    )
 
 
 def test_disabled_records_nothing(monkeypatch):

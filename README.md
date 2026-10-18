@@ -154,7 +154,7 @@ the `settings` table and applied from the next run).
 
 Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export OpenTelemetry traces. Each pipeline run is one trace, and each resume rewrite is another. Agent model calls are child spans of whichever trace is open (`experience`, `fit`, `checker`, or `other`). Prompts and resume text are not included. Leave the endpoint unset and nothing is exported.
 
-Langfuse accepts this export. Point the endpoint at `https://cloud.langfuse.com/api/public/otel` (or a self-hosted `/api/public/otel`) and set `OTEL_EXPORTER_OTLP_HEADERS` to `Authorization=Basic` plus the base64 of `public_key:secret_key`. Any other OTLP HTTP collector uses the same two variables.
+Langfuse accepts this export. The endpoint has to include `/api/public/otel` (`https://us.cloud.langfuse.com/api/public/otel` for the US cloud, `https://cloud.langfuse.com/api/public/otel` for EU). The host alone is posted to `/v1/traces` and Langfuse returns 404. `OTEL_EXPORTER_OTLP_HEADERS` is `Authorization=Basic` plus the base64 of `public_key:secret_key`. A host-only Langfuse URL, or a raw `pk:sk` token, is corrected at startup. Any other OTLP HTTP collector uses the same two variables.
 
 ## Tests
 

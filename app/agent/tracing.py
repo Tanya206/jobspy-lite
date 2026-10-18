@@ -10,8 +10,11 @@ status, and token counts live only on the chat span. Prompts, completions,
 and resume text are never attributes.
 """
 
+import base64
+import binascii
 import logging
 import os
+import re
 import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, Optional
@@ -38,6 +41,59 @@ def tracing_enabled() -> bool:
     return _enabled
 
 
+def traces_endpoint(endpoint: str) -> str:
+    """Full OTLP traces URL. Langfuse's collector is under ``/api/public/otel``.
+
+    A host-only value such as ``https://us.cloud.langfuse.com`` would otherwise
+    be posted to ``/v1/traces``, which Langfuse answers with 404.
+    """
+    base = endpoint.strip().rstrip("/")
+    lowered = base.lower()
+    if (
+        "langfuse" in lowered
+        and "/api/public/otel" not in lowered
+        and not lowered.endswith("/v1/traces")
+    ):
+        base = base + "/api/public/otel"
+    if base.endswith("/v1/traces"):
+        return base
+    return base + "/v1/traces"
+
+
+def _is_base64(token: str) -> bool:
+    try:
+        base64.b64decode(token, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return True
+
+
+def otlp_headers(raw: str) -> Optional[Dict[str, str]]:
+    """Authorization header for the exporter.
+
+    Langfuse wants ``Basic`` plus the base64 of ``public_key:secret_key``.
+    A raw ``pk-...:sk-...`` token is encoded here. ``None`` leaves header
+    parsing to the SDK.
+    """
+    match = re.search(r"(?i)authorization=Basic\s+(\S+)", raw or "")
+    if not match:
+        return None
+    token = match.group(1).strip().strip('"').strip("'")
+    if _is_base64(token):
+        encoded = token
+        rewritten = False
+    elif ":" in token:
+        encoded = base64.b64encode(token.encode("utf-8")).decode("ascii")
+        rewritten = True
+    else:
+        return None
+    if rewritten:
+        logger.warning(
+            "OTLP Basic token is not base64; encoding public_key:secret_key before export."
+        )
+    return {"Authorization": f"Basic {encoded}"}
+
+
 def setup_tracing() -> None:
     """Start the OTLP HTTP exporter. No-op when unset or already started."""
     global _provider, _enabled
@@ -55,15 +111,19 @@ def setup_tracing() -> None:
             from opentelemetry.sdk.trace import TracerProvider
             from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-            # The exporter reads OTEL_EXPORTER_OTLP_ENDPOINT and appends
-            # /v1/traces, and reads OTEL_EXPORTER_OTLP_HEADERS for auth.
+            # Pass the full signal URL. The exporter only appends /v1/traces
+            # when it reads OTEL_EXPORTER_OTLP_ENDPOINT itself.
+            url = traces_endpoint(endpoint)
+            headers = otlp_headers(os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", ""))
             provider = TracerProvider(
                 resource=Resource.create({"service.name": "jobspy-lite"})
             )
-            provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+            provider.add_span_processor(
+                BatchSpanProcessor(OTLPSpanExporter(endpoint=url, headers=headers))
+            )
             _provider = provider
             _enabled = True
-            logger.info("OpenTelemetry export enabled (endpoint %s)", endpoint)
+            logger.info("OpenTelemetry export enabled (%s)", url)
         except Exception:
             logger.exception(
                 "OpenTelemetry setup failed; traces will not be exported"
