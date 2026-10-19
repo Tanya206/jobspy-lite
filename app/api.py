@@ -46,7 +46,13 @@ from starlette.requests import Request
 
 from . import notify, scheduler, storage
 from .agent.resume_io import extract_text, load_resume_docx, save_resume_docx
-from .agent.tracing import finish_rewrite, rewrite_span, setup_tracing, shutdown_tracing
+from .agent.tracing import (
+    finish_rewrite,
+    job_title,
+    rewrite_span,
+    setup_tracing,
+    shutdown_tracing,
+)
 from .config import EXCEL_PATH, PROJECT_ROOT, clamp_int, normalize_provider
 from .pipeline import PipelineContext, request_shutdown, run_pipeline, wait_for_idle
 from .schemas import (
@@ -343,11 +349,7 @@ def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
             return client.parse(messages, text_format, label=label)
 
         original = load_resume_docx()
-        title = " @ ".join(
-            part
-            for part in ((job or {}).get("title"), (job or {}).get("company"))
-            if part
-        )
+        title = job_title(job)
         with rewrite_span(rewrite_id, job_key, max_tries, title=title) as trace_span:
             result = run_loop(
                 resume_text=resume_text,

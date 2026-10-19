@@ -32,10 +32,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import notify, storage
 from .agent.ai_job_agent import AIJobAgent
 from .agent.observability import AI_METRICS
-from .agent.tracing import annotate_pipeline, pipeline_span
+from .agent.tracing import (
+    annotate_pipeline,
+    experience_match_span,
+    pipeline_span,
+    resume_match_span,
+)
 from .config import RESCORE_AFTER_HOURS, clamp_int
 from .scraper import JobScraper, ScrapeResult
-from .util import make_json_safe
+from .util import job_key, make_json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +212,7 @@ def _screen_one(
     job: Dict[str, Any],
     context: PipelineContext,
     stop_event: Optional[threading.Event] = None,
+    key: str = "",
 ) -> Dict[str, Any]:
     """Run both agents for one posting and return the annotated copy.
 
@@ -222,8 +228,10 @@ def _screen_one(
     if shutdown_requested() or (stop_event is not None and stop_event.is_set()):
         raise ScoringSkipped()
     required = None
+    trace_key = key or job_key(job)
     try:
-        required = agent._estimate_required_years(job)
+        with experience_match_span(trace_key, job):
+            required = agent._estimate_required_years(job)
     except Exception as exc:
         raise ScoreFailure(
             f"experience agent: {exc}", status=_http_status(exc)
@@ -237,7 +245,8 @@ def _screen_one(
     annotated["experience_match"] = matched
     if matched:
         try:
-            suitability = agent.assess_suitability(job, context.resume_text)
+            with resume_match_span(trace_key, job):
+                suitability = agent.assess_suitability(job, context.resume_text)
         except Exception as exc:
             raise ScoreFailure(
                 f"suitability agent: {exc}", status=_http_status(exc)
@@ -336,12 +345,12 @@ def _score_postings(
     permanent_count = 0
     stop_scoring = threading.Event()
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        # Workers do not inherit contextvars. Copy the run's trace context
-        # so each model call stays a child of this pipeline span.
+        # Workers do not inherit contextvars. Copy the run's context so each
+        # job trace records this run's id.
         futures = {
             pool.submit(
                 contextvars.copy_context().run,
-                _screen_one, agent, job, context, stop_scoring,
+                _screen_one, agent, job, context, stop_scoring, key,
             ): key
             for key, job in jobs
         }

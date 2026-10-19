@@ -1,10 +1,19 @@
-"""OpenTelemetry traces for pipeline runs and resume rewrites.
+"""OpenTelemetry traces for pipeline runs and per-job agent work.
 
-Export is off unless ``tracing.otel_endpoint`` is set in config.yaml. There are two
-traces: one ``pipeline · …`` root per run, and one ``rewrite · {job}`` root
-per resume rewrite. Model calls are children of whichever root is open.
-A call with no open root is dropped. Langfuse gets ``langfuse.trace.name``
-on every span so the steps stay under that one header.
+Export is off unless ``tracing.otel_endpoint`` is set in config.yaml.
+
+Each job is one Langfuse session (see ``job_session_id``). A session holds
+three kinds of trace, one per agent step:
+
+* ``Experience Match``: required-years estimate vs. the experience window.
+* ``Resume Match``: resume suitability score for the job.
+* ``Resume Rewrite``: the planner/executor/checker rewrite loop.
+
+Each pipeline run also gets a ``pipeline · …`` trace with run totals only.
+Job traces are separate roots and carry the run id as metadata. Model
+calls are children of whichever job trace is open. A call with no open
+root is dropped. Langfuse gets ``langfuse.trace.name`` and
+``langfuse.session.id`` on every span so the steps stay under one header.
 
 Run totals live only on the pipeline root. Model, agent, attempts, HTTP
 status, and token counts live only on the chat span. Prompts, completions,
@@ -14,6 +23,7 @@ and resume text are never attributes.
 import base64
 import binascii
 import contextvars
+import hashlib
 import logging
 import os
 import re
@@ -29,10 +39,20 @@ _enabled = False
 
 _KNOWN_AGENTS = frozenset({"experience", "fit", "rewrite", "checker"})
 _TEXT_LIMIT = 300
-# Copied onto every span opened while a rewrite (or pipeline) root is active,
-# so Langfuse shows one named trace instead of one row per model call.
+# Langfuse drops session ids of 200 characters or more, and non-ASCII ones.
+_SESSION_TITLE_LIMIT = 120
+
+EXPERIENCE_MATCH = "Experience Match"
+RESUME_MATCH = "Resume Match"
+RESUME_REWRITE = "Resume Rewrite"
+
+# Copied onto every span opened while a job trace is active, so Langfuse
+# shows one named trace instead of one row per model call.
 _langfuse_trace: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.ContextVar(
     "jobspy_langfuse_trace", default=None
+)
+_pipeline_run: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "jobspy_pipeline_run", default=None
 )
 
 
@@ -46,6 +66,24 @@ def agent_from_label(label: str) -> str:
 
 def tracing_enabled() -> bool:
     return _enabled
+
+
+def job_title(job: Optional[Dict[str, Any]]) -> str:
+    """``Role @ Company`` for a job dict, skipping empty parts."""
+    job = job or {}
+    return " @ ".join(part for part in (job.get("title"), job.get("company")) if part)
+
+
+def job_session_id(job_key: str, title: str = "") -> str:
+    """Langfuse session id for one job. Same job key, same session.
+
+    Job keys are usually long URLs, so the id is the readable title plus a
+    short hash of the key.
+    """
+    digest = hashlib.sha256((job_key or "").encode("utf-8")).hexdigest()[:10]
+    readable = re.sub(r"[^A-Za-z0-9@&.,()/ _-]+", "", title or "")
+    readable = re.sub(r"\s+", " ", readable).strip()[:_SESSION_TITLE_LIMIT].strip()
+    return f"{readable} #{digest}" if readable else f"job #{digest}"
 
 
 def traces_endpoint(endpoint: str) -> str:
@@ -190,15 +228,23 @@ def _mark_error(span: Any, message: str) -> None:
 
 
 @contextmanager
-def _open(name: str, attributes: Dict[str, Any]) -> Iterator[Any]:
-    """Start a span, or yield None when tracing is off or setup failed."""
+def _open(name: str, attributes: Dict[str, Any], root: bool = False) -> Iterator[Any]:
+    """Start a span, or yield None when tracing is off or setup failed.
+
+    ``root`` starts a new trace even when another span is current.
+    """
     if not _enabled or _provider is None:
         yield None
         return
     otel_cm = None
     try:
         tracer = _provider.get_tracer("jobspy-lite")
-        otel_cm = tracer.start_as_current_span(name)
+        if root:
+            from opentelemetry.context import Context
+
+            otel_cm = tracer.start_as_current_span(name, context=Context())
+        else:
+            otel_cm = tracer.start_as_current_span(name)
         span = otel_cm.__enter__()
         merged = _with_trace_attributes(attributes)
         for key, value in merged.items():
@@ -244,20 +290,27 @@ def _trace_header(name: str, session_id: str) -> Iterator[None]:
 
 @contextmanager
 def pipeline_span(run_id: str, trigger: str) -> Iterator[Any]:
-    """Root span for one pipeline run. Yields None when tracing is off."""
+    """Root span for one pipeline run. Yields None when tracing is off.
+
+    Job traces opened during the run are separate roots that record
+    ``run_id`` as metadata, so this trace holds run totals only.
+    """
     header = f"pipeline · {trigger}"
-    with _trace_header(header, run_id):
+    token = _pipeline_run.set(run_id)
+    try:
         with _open(
             header,
             {
                 "run_id": run_id,
                 "trigger": trigger,
                 "langfuse.trace.name": header,
-                "langfuse.session.id": run_id,
                 "langfuse.observation.type": "span",
             },
+            root=True,
         ) as span:
             yield span
+    finally:
+        _pipeline_run.reset(token)
 
 
 def annotate_pipeline(span: Any, summary: Dict[str, Any]) -> None:
@@ -284,37 +337,70 @@ def annotate_pipeline(span: Any, summary: Dict[str, Any]) -> None:
 
 
 @contextmanager
+def _job_trace(
+    name: str,
+    job_key: str,
+    title: str,
+    attributes: Dict[str, Any],
+) -> Iterator[Any]:
+    """New root trace ``name`` in the job's session. Errors mark the root."""
+    session_id = job_session_id(job_key, title)
+    merged: Dict[str, Any] = {
+        "job_key": job_key,
+        "langfuse.trace.name": name,
+        "langfuse.session.id": session_id,
+        "langfuse.observation.type": "span",
+        "langfuse.trace.metadata.job_key": job_key,
+        "langfuse.trace.metadata.job_title": title or None,
+        "langfuse.trace.metadata.run_id": _pipeline_run.get(),
+    }
+    merged.update(attributes)
+    with _trace_header(name, session_id):
+        with _open(name, merged, root=True) as span:
+            try:
+                yield span
+            except Exception as exc:
+                _mark_error(span, str(exc))
+                raise
+
+
+@contextmanager
+def experience_match_span(job_key: str, job: Optional[Dict[str, Any]] = None) -> Iterator[Any]:
+    """``Experience Match`` trace for one job's required-years estimate."""
+    with _job_trace(EXPERIENCE_MATCH, job_key, job_title(job), {}) as span:
+        yield span
+
+
+@contextmanager
+def resume_match_span(job_key: str, job: Optional[Dict[str, Any]] = None) -> Iterator[Any]:
+    """``Resume Match`` trace for one job's suitability score."""
+    with _job_trace(RESUME_MATCH, job_key, job_title(job), {}) as span:
+        yield span
+
+
+@contextmanager
 def rewrite_span(
     rewrite_id: str,
     job_key: str,
     max_tries: int,
     title: str = "",
 ) -> Iterator[Any]:
-    """One trace for a job's resume rewrite. Model calls are children of it.
+    """``Resume Rewrite`` trace for one rewrite. Model calls are children of it.
 
-    ``title`` is the header Langfuse shows, usually ``Role @ Company``.
-    The session id is the job key, so a later rewrite of the same job
-    groups with this one.
+    ``title`` is usually ``Role @ Company``. It shares the job's session
+    with that job's match traces, and later rewrites group there too.
     """
-    header = f"rewrite · {title.strip() or job_key or rewrite_id}"
-    with _trace_header(header, job_key):
-        with _open(
-            header,
-            {
-                "rewrite_id": rewrite_id,
-                "job_key": job_key,
-                "max_tries": int(max_tries),
-                "langfuse.trace.name": header,
-                "langfuse.session.id": job_key,
-                "langfuse.observation.type": "span",
-                "langfuse.trace.metadata.job_key": job_key,
-            },
-        ) as span:
-            try:
-                yield span
-            except Exception as exc:
-                _mark_error(span, str(exc))
-                raise
+    with _job_trace(
+        RESUME_REWRITE,
+        job_key,
+        title.strip(),
+        {
+            "rewrite_id": rewrite_id,
+            "max_tries": int(max_tries),
+            "langfuse.trace.metadata.rewrite_id": rewrite_id,
+        },
+    ) as span:
+        yield span
 
 
 def finish_rewrite(span: Any, status: str) -> None:

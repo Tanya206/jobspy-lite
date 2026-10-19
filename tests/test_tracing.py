@@ -11,15 +11,21 @@ from pydantic import BaseModel
 from app.agent.ai_client import AIClient
 from app.agent.tracing import (
     annotate_pipeline,
+    experience_match_span,
     install_span_exporter,
+    job_session_id,
     otlp_headers,
     pipeline_span,
+    resume_match_span,
     rewrite_span,
     setup_tracing,
     shutdown_tracing,
     traces_endpoint,
     tracing_enabled,
 )
+
+JOB = {"title": "AI Engineer", "company": "Acme"}
+JOB_KEY = "https://example.com/jobs/" + "x" * 300
 
 
 class Out(BaseModel):
@@ -93,7 +99,7 @@ def _blob(span) -> str:
     return "\n".join(parts)
 
 
-def test_chat_spans_are_children_and_do_not_repeat_the_parent(monkeypatch):
+def test_match_traces_are_separate_roots_in_the_job_session(monkeypatch):
     monkeypatch.setattr("app.agent.ai_client.time.sleep", lambda _s: None)
     monkeypatch.setattr("app.agent.ai_client.MAX_PARSE_ATTEMPTS", 3)
     exporter = MemoryExporter()
@@ -110,17 +116,19 @@ def test_chat_spans_are_children_and_do_not_repeat_the_parent(monkeypatch):
     monkeypatch.setattr(client._client.beta.chat.completions, "parse", fake_parse)
 
     with pipeline_span("run-1", "manual") as root:
-        client.parse(
-            messages=[{"role": "user", "content": SECRET}],
-            text_format=Out,
-            label="experience[Role @ Co]",
-        )
-        with pytest.raises(_FakeHTTPError):
+        with experience_match_span(JOB_KEY, JOB):
             client.parse(
                 messages=[{"role": "user", "content": SECRET}],
                 text_format=Out,
-                label="fit[Role @ Co]",
+                label="experience[Role @ Co]",
             )
+        with pytest.raises(_FakeHTTPError):
+            with resume_match_span(JOB_KEY, JOB):
+                client.parse(
+                    messages=[{"role": "user", "content": SECRET}],
+                    text_format=Out,
+                    label="fit[Role @ Co]",
+                )
         annotate_pipeline(
             root,
             {
@@ -143,7 +151,21 @@ def test_chat_spans_are_children_and_do_not_repeat_the_parent(monkeypatch):
     assert len(parents) == 1
     assert len(children) == 2
     parent = parents[0]
-    assert all(child.parent.span_id == parent.context.span_id for child in children)
+    assert all(child.context.trace_id != parent.context.trace_id for child in children)
+    assert "langfuse.session.id" not in parent.attributes
+
+    by_name = {span.name: span for span in finished}
+    experience_root = by_name["Experience Match"]
+    resume_root = by_name["Resume Match"]
+    session = job_session_id(JOB_KEY, "AI Engineer @ Acme")
+    for job_root in (experience_root, resume_root):
+        assert job_root.parent is None
+        assert job_root.attributes["langfuse.session.id"] == session
+        assert job_root.attributes["langfuse.trace.metadata.run_id"] == "run-1"
+        assert job_root.attributes["langfuse.trace.metadata.job_title"] == "AI Engineer @ Acme"
+    assert experience_root.context.trace_id != resume_root.context.trace_id
+    assert experience_root.status.status_code != StatusCode.ERROR
+    assert resume_root.status.status_code == StatusCode.ERROR
     assert parent.attributes["run_id"] == "run-1"
     assert parent.attributes["status"] == "degraded"
     assert parent.attributes["jobs_scraped"] == 2
@@ -153,6 +175,9 @@ def test_chat_spans_are_children_and_do_not_repeat_the_parent(monkeypatch):
     assert parent.status.status_code != StatusCode.ERROR
 
     by_agent = {span.attributes["jobspy.agent"]: span for span in children}
+    assert by_agent["experience"].parent.span_id == experience_root.context.span_id
+    assert by_agent["fit"].parent.span_id == resume_root.context.span_id
+    assert all(span.attributes["langfuse.session.id"] == session for span in children)
     success = by_agent["experience"]
     assert success.attributes["jobspy.attempts"] == 1
     assert success.attributes["gen_ai.request.model"] == "test-model"
@@ -174,7 +199,7 @@ def test_chat_spans_are_children_and_do_not_repeat_the_parent(monkeypatch):
     assert SECRET not in exported
 
 
-def test_worker_thread_stays_under_the_pipeline_span(monkeypatch):
+def test_worker_thread_job_trace_records_the_run(monkeypatch):
     exporter = MemoryExporter()
     install_span_exporter(exporter)
     client = _client()
@@ -183,11 +208,12 @@ def test_worker_thread_stays_under_the_pipeline_span(monkeypatch):
     )
 
     def score():
-        client.parse(
-            messages=[{"role": "user", "content": SECRET}],
-            text_format=Out,
-            label="experience[Role @ Co]",
-        )
+        with experience_match_span(JOB_KEY, JOB):
+            client.parse(
+                messages=[{"role": "user", "content": SECRET}],
+                text_format=Out,
+                label="experience[Role @ Co]",
+            )
 
     with pipeline_span("run-2", "cron"):
         import contextvars
@@ -196,14 +222,25 @@ def test_worker_thread_stays_under_the_pipeline_span(monkeypatch):
             pool.submit(contextvars.copy_context().run, score).result()
 
     finished = exporter.get_finished_spans()
-    parent = next(span for span in finished if span.name == "pipeline · cron")
+    root = next(span for span in finished if span.name == "Experience Match")
     child = next(
         span
         for span in finished
         if (span.attributes or {}).get("gen_ai.operation.name") == "chat"
     )
-    assert child.parent.span_id == parent.context.span_id
+    assert child.parent.span_id == root.context.span_id
+    assert root.attributes["langfuse.trace.metadata.run_id"] == "run-2"
     assert child.attributes["jobspy.agent"] == "experience"
+
+
+def test_session_id_is_short_ascii_and_stable_per_job():
+    session = job_session_id(JOB_KEY, "Ingénieur IA @ Acme")
+    assert session == job_session_id(JOB_KEY, "Ingénieur IA @ Acme")
+    assert session != job_session_id(JOB_KEY + "2", "Ingénieur IA @ Acme")
+    assert session.isascii()
+    assert len(session) < 200
+    assert session.startswith("Ingnieur IA @ Acme #")
+    assert job_session_id(JOB_KEY).startswith("job #")
 
 
 def test_rewrite_steps_share_one_named_trace(monkeypatch):
@@ -214,7 +251,7 @@ def test_rewrite_steps_share_one_named_trace(monkeypatch):
         client._client.beta.chat.completions, "parse", lambda **_kwargs: _ok_response()
     )
 
-    with rewrite_span("rw-1", "job-1", 3, title="AI Engineer @ Acme"):
+    with rewrite_span("rw-1", JOB_KEY, 3, title="AI Engineer @ Acme"):
         client.parse(
             messages=[{"role": "user", "content": SECRET}],
             text_format=Out,
@@ -229,16 +266,18 @@ def test_rewrite_steps_share_one_named_trace(monkeypatch):
     finished = exporter.get_finished_spans()
     root = next(span for span in finished if span.attributes.get("rewrite_id") == "rw-1")
     children = [span for span in finished if span is not root]
-    assert root.name == "rewrite · AI Engineer @ Acme"
+    session = job_session_id(JOB_KEY, "AI Engineer @ Acme")
+    assert root.name == "Resume Rewrite"
     assert root.attributes["langfuse.trace.name"] == root.name
-    assert root.attributes["langfuse.session.id"] == "job-1"
+    assert root.attributes["langfuse.session.id"] == session
+    assert root.attributes["langfuse.trace.metadata.rewrite_id"] == "rw-1"
     assert {span.name for span in children} == {"planner", "executor"}
     assert all(span.parent.span_id == root.context.span_id for span in children)
     assert all(span.context.trace_id == root.context.trace_id for span in children)
     assert all(
         span.attributes["langfuse.trace.name"] == root.name for span in children
     )
-    assert all(span.attributes["langfuse.session.id"] == "job-1" for span in children)
+    assert all(span.attributes["langfuse.session.id"] == session for span in children)
 
 
 def test_orphan_parse_is_dropped(monkeypatch):

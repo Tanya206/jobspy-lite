@@ -156,7 +156,7 @@ table and applied from the next run.
 
 ## Traces
 
-Set `tracing.otel_endpoint` in `config.yaml` to export OpenTelemetry traces. Each pipeline run is one trace, and each resume rewrite is another. Agent model calls are child spans of whichever trace is open (`experience`, `fit`, `checker`, or `other`). Prompts and resume text are not included. Leave the endpoint empty and nothing is exported. The auth header stays in `.env` as `OTEL_EXPORTER_OTLP_HEADERS`.
+Set `tracing.otel_endpoint` in `config.yaml` to export OpenTelemetry traces. Each job is one Langfuse session (named `Role @ Company #hash`) with three kinds of trace: `Experience Match` (required-years estimate), `Resume Match` (suitability score), and `Resume Rewrite` (the rewrite loop). Agent model calls are child spans of their trace. Match traces carry the pipeline `run_id` as metadata. Each pipeline run also gets a `pipeline · cron|manual` trace with run totals. Prompts and resume text are not included. Leave the endpoint empty and nothing is exported. The auth header stays in `.env` as `OTEL_EXPORTER_OTLP_HEADERS`.
 
 Langfuse accepts this export. The endpoint has to include `/api/public/otel` (`https://us.cloud.langfuse.com/api/public/otel` for the US cloud, `https://cloud.langfuse.com/api/public/otel` for EU). The host alone is posted to `/v1/traces` and Langfuse returns 404. `OTEL_EXPORTER_OTLP_HEADERS` is `Authorization=Basic` plus the base64 of `public_key:secret_key`. A host-only Langfuse URL, or a raw `pk:sk` token, is corrected at startup. Any other OTLP HTTP collector uses the same two variables.
 
