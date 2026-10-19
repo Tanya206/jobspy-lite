@@ -14,6 +14,7 @@ from app.agent.tracing import (
     install_span_exporter,
     otlp_headers,
     pipeline_span,
+    rewrite_span,
     setup_tracing,
     shutdown_tracing,
     traces_endpoint,
@@ -133,8 +134,12 @@ def test_chat_spans_are_children_and_do_not_repeat_the_parent(monkeypatch):
         )
 
     finished = exporter.get_finished_spans()
-    parents = [span for span in finished if span.name == "jobspy.pipeline"]
-    children = [span for span in finished if span.name == "gen_ai.chat"]
+    parents = [span for span in finished if span.name == "pipeline · manual"]
+    children = [
+        span
+        for span in finished
+        if (span.attributes or {}).get("gen_ai.operation.name") == "chat"
+    ]
     assert len(parents) == 1
     assert len(children) == 2
     parent = parents[0]
@@ -191,10 +196,49 @@ def test_worker_thread_stays_under_the_pipeline_span(monkeypatch):
             pool.submit(contextvars.copy_context().run, score).result()
 
     finished = exporter.get_finished_spans()
-    parent = next(span for span in finished if span.name == "jobspy.pipeline")
-    child = next(span for span in finished if span.name == "gen_ai.chat")
+    parent = next(span for span in finished if span.name == "pipeline · cron")
+    child = next(
+        span
+        for span in finished
+        if (span.attributes or {}).get("gen_ai.operation.name") == "chat"
+    )
     assert child.parent.span_id == parent.context.span_id
     assert child.attributes["jobspy.agent"] == "experience"
+
+
+def test_rewrite_steps_share_one_named_trace(monkeypatch):
+    exporter = MemoryExporter()
+    install_span_exporter(exporter)
+    client = _client()
+    monkeypatch.setattr(
+        client._client.beta.chat.completions, "parse", lambda **_kwargs: _ok_response()
+    )
+
+    with rewrite_span("rw-1", "job-1", 3, title="AI Engineer @ Acme"):
+        client.parse(
+            messages=[{"role": "user", "content": SECRET}],
+            text_format=Out,
+            label="planner",
+        )
+        client.parse(
+            messages=[{"role": "user", "content": SECRET}],
+            text_format=Out,
+            label="executor",
+        )
+
+    finished = exporter.get_finished_spans()
+    root = next(span for span in finished if span.attributes.get("rewrite_id") == "rw-1")
+    children = [span for span in finished if span is not root]
+    assert root.name == "rewrite · AI Engineer @ Acme"
+    assert root.attributes["langfuse.trace.name"] == root.name
+    assert root.attributes["langfuse.session.id"] == "job-1"
+    assert {span.name for span in children} == {"planner", "executor"}
+    assert all(span.parent.span_id == root.context.span_id for span in children)
+    assert all(span.context.trace_id == root.context.trace_id for span in children)
+    assert all(
+        span.attributes["langfuse.trace.name"] == root.name for span in children
+    )
+    assert all(span.attributes["langfuse.session.id"] == "job-1" for span in children)
 
 
 def test_orphan_parse_is_dropped(monkeypatch):
@@ -237,7 +281,10 @@ def test_raw_langfuse_basic_token_is_encoded():
 
 
 def test_disabled_records_nothing(monkeypatch):
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    from app.agent.tracing import shutdown_tracing
+
+    shutdown_tracing()
+    monkeypatch.setattr("app.config.OTEL_ENDPOINT", "")
     setup_tracing()
     assert tracing_enabled() is False
     exporter = MemoryExporter()

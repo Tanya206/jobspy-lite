@@ -335,30 +335,41 @@ def score_text(text: str, complete: Callable[..., Any]) -> AtsScore:
 
 def rewrite_target(model: str, base_url: str, agent_params: Dict[str, Any]) -> Dict[str, Any]:
     """Empty model or base URL means use the scoring model and base URL."""
-    from ..config import AI_BASE_URL, AI_MODEL
+    from ..config import AI_BASE_URL, AI_MODEL, REWRITE_BASE_URL, REWRITE_MODEL, resolve_api_key
 
-    chosen_model = (model or "").strip() or str(agent_params.get("rewrite_model") or "").strip() or AI_MODEL
+    chosen_model = (
+        (model or "").strip()
+        or str(agent_params.get("rewrite_model") or "").strip()
+        or REWRITE_MODEL
+        or AI_MODEL
+    )
     chosen_base = (
         (base_url or "").strip()
         or str(agent_params.get("rewrite_base_url") or "").strip()
+        or REWRITE_BASE_URL
         or AI_BASE_URL
     )
+    # REWRITE_API_KEY is an explicit override. Otherwise the host picks
+    # OPENAI_API_KEY or NVIDIA_API_KEY.
+    rewrite_key = (os.environ.get("REWRITE_API_KEY") or "").strip()
     return {
         "model": chosen_model,
         "base_url": chosen_base,
         "rate_limited": "api.nvidia.com" in chosen_base,
-        "api_key": os.environ.get("REWRITE_API_KEY") or os.environ.get("NVIDIA_API_KEY"),
+        "api_key": rewrite_key or resolve_api_key(chosen_base),
     }
 
 
 def make_client(model: str, base_url: str, agent_params: Dict[str, Any]) -> AIClient:
+    from ..config import REWRITE_TIMEOUT_SECONDS
+
     target = rewrite_target(model, base_url, agent_params)
     return AIClient(
         {
             "ai_model": target["model"],
             "ai_base_url": target["base_url"],
             "api_key": target["api_key"],
-            "timeout_seconds": 180,
+            "timeout_seconds": REWRITE_TIMEOUT_SECONDS,
             "rate_limited": target["rate_limited"],
         }
     )

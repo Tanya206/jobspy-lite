@@ -29,14 +29,12 @@ Create `.env` in the repo root (copy `.env.example`):
 | Key | Required | Purpose |
 |---|---|---|
 | `NVIDIA_API_KEY` | yes | LLM key for scoring (integrate.api.nvidia.com) |
+| `OPENAI_API_KEY` | when `ai.provider` is openai | OpenAI API key |
 | `TELEGRAM_BOT_TOKEN` | yes | from @BotFather |
 | `TELEGRAM_CHAT_ID` | yes | numeric id (NOT the t.me link). Get it: message the bot, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` |
-| `MAX_WORKERS` | no | parallel AI scoring jobs (default 4; 10 works well) |
-| `AI_RATE_LIMIT_PER_MIN` | no | calls/min (NVIDIA free tier caps at 40; default 30) |
-| `RESCORE_AFTER_HOURS` | no | re-score window (default 72; 0 = never) |
-| `SCORE_THRESHOLD` | no | Telegram alert threshold (default 70) |
-| `SEARCH_TERMS`, `LOCATION`, `SITES`, `RESULTS_WANTED`, `HOURS_OLD`, `COUNTRY_INDEED`, `IS_REMOTE`, `EXPERIENCE_MIN_YEARS`, `EXPERIENCE_MAX_YEARS` | no | scrape/filter defaults, all editable in the dashboard later |
-| `PROXIES` | no | comma-separated proxies; datacenter IPs get blocked by LinkedIn/Indeed |
+| `OTEL_EXPORTER_OTLP_HEADERS` | no | trace export auth; the endpoint is `tracing.otel_endpoint` in config.yaml |
+
+Scrape, screening, workers, rate limit, rescore window, proxies, and the scheduler live in `config.yaml`, not `.env`.
 
 ### CI/CD secrets — GitHub repo → Settings → Secrets and variables → Actions
 

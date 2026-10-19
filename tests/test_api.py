@@ -219,6 +219,29 @@ def test_agent_params_roundtrip_and_sanitization(client):
     assert params["ai_rate_limit_per_min"] == 30
 
 
+def test_openai_provider_roundtrip(client):
+    updated = client.post(
+        "/settings",
+        json={"agent_params": {
+            "ai_provider": "openai",
+            "ai_model": "gpt-4.1-mini",
+            "ai_base_url": "https://api.openai.com/v1",
+        }},
+    )
+    assert updated.status_code == 200
+    params = updated.json()["agent_params"]
+    assert params["ai_provider"] == "openai"
+    assert params["ai_model"] == "gpt-4.1-mini"
+    assert params["ai_base_url"] == "https://api.openai.com/v1"
+
+    rejected = client.post(
+        "/settings",
+        json={"agent_params": {"ai_provider": "not-a-provider", "ai_model": "gpt-4.1-mini"}},
+    )
+    assert rejected.status_code == 200
+    assert rejected.json()["agent_params"]["ai_provider"] != "not-a-provider"
+
+
 def test_scrape_params_roundtrip(client):
     updated = client.post(
         "/settings",

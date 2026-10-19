@@ -7,6 +7,28 @@ import {
 import { formatIst } from '../datetime.js'
 import { ErrorBanner, ProgressBar, Spinner } from './ui.jsx'
 
+const AI_PROVIDERS = {
+  nvidia: {
+    model: 'nvidia/nemotron-3-super-120b-a12b',
+    baseUrl: 'https://integrate.api.nvidia.com/v1',
+  },
+  openai: {
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  },
+}
+
+function providerOf(params) {
+  const url = String(params?.ai_base_url || '').toLowerCase()
+  if (url.includes('api.openai.com')) return 'openai'
+  if (url.includes('api.nvidia.com')) return 'nvidia'
+  if (!url && (params?.ai_provider === 'openai' || params?.ai_provider === 'nvidia')) {
+    return params.ai_provider
+  }
+  if (!url) return 'nvidia'
+  return 'custom'
+}
+
 function StatCard({ label, value, tone }) {
   return (
     <div className={`stat-card${tone ? ` stat-card--${tone}` : ''}`}>
@@ -328,9 +350,36 @@ export default function Dashboard({ onGoJobs }) {
           {settings?.agent_params ? (
             <>
               <label className="inline">
+                provider
+                <select
+                  className="select"
+                  value={providerOf(settings.agent_params)}
+                  onChange={(e) => {
+                    const id = e.target.value
+                    const preset = AI_PROVIDERS[id]
+                    if (!preset) return
+                    onSaveSettings({
+                      agent_params: {
+                        ...settings.agent_params,
+                        ai_provider: id,
+                        ai_model: preset.model,
+                        ai_base_url: preset.baseUrl,
+                      },
+                    })
+                  }}
+                >
+                  <option value="nvidia">NVIDIA NIM</option>
+                  <option value="openai">OpenAI</option>
+                  {providerOf(settings.agent_params) === 'custom' ? (
+                    <option value="custom">Custom</option>
+                  ) : null}
+                </select>
+              </label>
+              <label className="inline">
                 model
                 <input
                   className="input" type="text"
+                  key={settings.agent_params.ai_model}
                   defaultValue={settings.agent_params.ai_model ?? ''}
                   onBlur={(e) => {
                     const v = e.target.value.trim()
@@ -344,6 +393,7 @@ export default function Dashboard({ onGoJobs }) {
                 base URL
                 <input
                   className="input" type="text"
+                  key={settings.agent_params.ai_base_url}
                   placeholder={settings.agent_params.ai_base_url || 'https://integrate.api.nvidia.com/v1'}
                   defaultValue={settings.agent_params.ai_base_url ?? ''}
                   onBlur={(e) => {
@@ -438,7 +488,7 @@ export default function Dashboard({ onGoJobs }) {
                   }}
                 />
               </label>
-              <p className="muted small">Model/URL apply from the next run; rate limit and workers apply live. Empty rewrite model and base URL use the scoring model. API keys stay in the server .env (REWRITE_API_KEY, else NVIDIA_API_KEY).</p>
+              <p className="muted small">Defaults come from config.yaml. Values saved here override that file. Model and URL apply from the next run; rate limit and workers apply live. Choosing NVIDIA or OpenAI fills the scoring model and base URL. Empty rewrite model and base URL use the scoring model. API keys stay in the server .env (OPENAI_API_KEY, NVIDIA_API_KEY, or REWRITE_API_KEY for rewrites).</p>
             </>
           ) : (
             <Spinner label="Loading settings…" />

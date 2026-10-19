@@ -47,11 +47,14 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-2. Copy `.env.example` to `.env` and fill in:
+2. Copy `.env.example` to `.env` and fill in the secrets only:
 
-- `NVIDIA_API_KEY` — your LLM key (OpenAI-compatible endpoint via `AI_BASE_URL`/`AI_MODEL`)
+- `NVIDIA_API_KEY` — NVIDIA NIM key (default provider in `config.yaml`)
+- `OPENAI_API_KEY` — required when `config.yaml` sets `ai.provider` to `openai`
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — create a bot with @BotFather, message it once,
   then read your chat id from `https://api.telegram.org/bot<TOKEN>/getUpdates`
+
+Everything else (provider, model, scrape, screening, scheduler, traces endpoint) is in `config.yaml`.
 
 3. Build the dashboard (optional — the API works without it):
 
@@ -146,13 +149,14 @@ jobs are kept) and run-history rows of the same age.
 
 ## Configuration
 
-All via `.env` (see `.env.example`); scrape params, experience window, and the
-score threshold can also be changed at runtime from the dashboard (stored in
-the `settings` table and applied from the next run).
+Non-secret settings live in `config.yaml`. Secrets live in `.env` (see `.env.example`).
+The dashboard can override scrape params, the experience window, the score
+threshold, and the AI model; those overrides are stored in the `settings`
+table and applied from the next run.
 
 ## Traces
 
-Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export OpenTelemetry traces. Each pipeline run is one trace, and each resume rewrite is another. Agent model calls are child spans of whichever trace is open (`experience`, `fit`, `checker`, or `other`). Prompts and resume text are not included. Leave the endpoint unset and nothing is exported.
+Set `tracing.otel_endpoint` in `config.yaml` to export OpenTelemetry traces. Each pipeline run is one trace, and each resume rewrite is another. Agent model calls are child spans of whichever trace is open (`experience`, `fit`, `checker`, or `other`). Prompts and resume text are not included. Leave the endpoint empty and nothing is exported. The auth header stays in `.env` as `OTEL_EXPORTER_OTLP_HEADERS`.
 
 Langfuse accepts this export. The endpoint has to include `/api/public/otel` (`https://us.cloud.langfuse.com/api/public/otel` for the US cloud, `https://cloud.langfuse.com/api/public/otel` for EU). The host alone is posted to `/v1/traces` and Langfuse returns 404. `OTEL_EXPORTER_OTLP_HEADERS` is `Authorization=Basic` plus the base64 of `public_key:secret_key`. A host-only Langfuse URL, or a raw `pk:sk` token, is corrected at startup. Any other OTLP HTTP collector uses the same two variables.
 

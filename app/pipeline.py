@@ -23,7 +23,6 @@ Sequence (each run, cron or manual):
 import contextvars
 import inspect
 import logging
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,15 +33,11 @@ from . import notify, storage
 from .agent.ai_job_agent import AIJobAgent
 from .agent.observability import AI_METRICS
 from .agent.tracing import annotate_pipeline, pipeline_span
-from .config import clamp_int
+from .config import RESCORE_AFTER_HOURS, clamp_int
 from .scraper import JobScraper, ScrapeResult
 from .util import make_json_safe
 
 logger = logging.getLogger(__name__)
-
-# A scored job is re-scored only after this many hours (env-tunable). Set 0
-# to disable periodic re-scoring entirely (resume change still triggers it).
-RESCORE_AFTER_HOURS = int(os.environ.get("RESCORE_AFTER_HOURS", "72"))
 
 # One pipeline run at a time, process-wide. The scheduler guard
 # (max_instances=1) and the API's 409 only protect their own path; this lock
@@ -137,7 +132,9 @@ class PipelineContext:
         # Retention: postings not seen for this many days are deleted at the
         # end of each run (0 = keep everything).
         try:
-            self.retention_days: int = max(0, int(self.settings.get("retention_days", 0) or 0))
+            self.retention_days: int = max(
+                0, int(self.settings.get("retention_days", self.config.get("retention_days", 0)) or 0)
+            )
         except (TypeError, ValueError):
             self.retention_days = 0
         # Runtime-editable AI knobs (dashboard → AI agent panel).

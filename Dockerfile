@@ -19,12 +19,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
+COPY config.yaml ./
 COPY run.py ./
 COPY --from=frontend-build /build/dist ./frontend/dist
 
-# DB / Excel / resume live on the mounted volume.
+# DB / Excel / resume live on the mounted volume. config.yaml data_dir is "data".
 RUN mkdir -p /app/data
-ENV JOBSPY_DATA_DIR=/app/data
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000

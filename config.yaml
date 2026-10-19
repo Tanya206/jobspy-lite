@@ -1,0 +1,66 @@
+# Non-secret settings for JobSpy Lite. This file is the only place they live.
+# Secrets (API keys, Telegram token, OTEL auth header) stay in .env.
+# The dashboard stores overrides in SQLite; those win over this file after you save them.
+
+ai:
+  # nvidia or openai. A blank model or base_url uses that provider's preset:
+  # nvidia → nvidia/nemotron-3-super-120b-a12b @ https://integrate.api.nvidia.com/v1
+  # openai → gpt-4.1-mini @ https://api.openai.com/v1
+  provider: openai
+  model: ""
+  base_url: ""
+  rate_limit_per_min: 120
+  max_workers: 10
+  timeout_seconds: 10
+  rewrite:
+    model: ""
+    base_url: ""
+    max_tries: 3
+    timeout_seconds: 10
+  checker:
+    model: ""
+    base_url: ""
+
+scrape:
+  sites:
+    - linkedin
+  search_terms:
+    - AI Engineer
+  location: Bengaluru
+  results_wanted: 600
+  hours_old: 2
+  country_indeed: india
+  linkedin_fetch_description: true
+  is_remote: true
+  scrape_cooldown_minutes: 0.2
+  proxies: []
+
+screening:
+  experience_min_years: 0
+  # Negative = no upper bound.
+  experience_max_years: 2
+  score_threshold: 70
+  # 0 = keep every posting.
+  retention_days: 0
+
+pipeline:
+  # 0 = never re-score on age. A new resume still re-scores everything.
+  rescore_after_hours: 72
+
+storage:
+  # Relative to the project root, or an absolute path.
+  data_dir: data
+
+scheduler:
+  mode: interval
+  interval_minutes: 120
+  active_from: 8
+  active_to: 22
+  cron_expression: "0 */2 * * *"
+  timezone: Asia/Kolkata
+  enabled: false
+
+tracing:
+  # Empty disables export. Auth stays in .env as OTEL_EXPORTER_OTLP_HEADERS.
+  # Langfuse needs the /api/public/otel path, not the host alone.
+  otel_endpoint: https://us.cloud.langfuse.com/api/public/otel

@@ -446,6 +446,27 @@ def test_export_golden_skips_empty_descriptions(temp_db):
     assert "Kubernetes" in (folder / "additional_info.txt").read_text(encoding="utf-8")
 
 
+def test_rewrite_target_picks_the_key_for_the_host(monkeypatch):
+    from app.agent.resume_rewrite import rewrite_target
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-key")
+    monkeypatch.delenv("REWRITE_API_KEY", raising=False)
+
+    openai = rewrite_target("", "https://api.openai.com/v1", {})
+    assert openai["api_key"] == "sk-openai"
+    assert openai["base_url"] == "https://api.openai.com/v1"
+    assert openai["rate_limited"] is False
+
+    nvidia = rewrite_target("", "https://integrate.api.nvidia.com/v1", {})
+    assert nvidia["api_key"] == "nv-key"
+    assert nvidia["rate_limited"] is True
+
+    monkeypatch.setenv("REWRITE_API_KEY", "rewrite-key")
+    overridden = rewrite_target("", "https://api.openai.com/v1", {})
+    assert overridden["api_key"] == "rewrite-key"
+
+
 def test_changes_keep_earlier_patches_when_the_winning_try_adds_none():
     from app.api import _stamp_rewrite
 

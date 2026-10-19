@@ -1,9 +1,10 @@
 """OpenTelemetry traces for pipeline runs and resume rewrites.
 
-Export is off unless ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set. There are two
-traces: one ``jobspy.pipeline`` root per run, and one ``jobspy.rewrite`` root
-per resume rewrite. A ``gen_ai.chat`` span is a child of whichever root is
-open. It is not its own trace, and a call with no open root is dropped.
+Export is off unless ``tracing.otel_endpoint`` is set in config.yaml. There are two
+traces: one ``pipeline · …`` root per run, and one ``rewrite · {job}`` root
+per resume rewrite. Model calls are children of whichever root is open.
+A call with no open root is dropped. Langfuse gets ``langfuse.trace.name``
+on every span so the steps stay under that one header.
 
 Run totals live only on the pipeline root. Model, agent, attempts, HTTP
 status, and token counts live only on the chat span. Prompts, completions,
@@ -12,6 +13,7 @@ and resume text are never attributes.
 
 import base64
 import binascii
+import contextvars
 import logging
 import os
 import re
@@ -27,6 +29,11 @@ _enabled = False
 
 _KNOWN_AGENTS = frozenset({"experience", "fit", "rewrite", "checker"})
 _TEXT_LIMIT = 300
+# Copied onto every span opened while a rewrite (or pipeline) root is active,
+# so Langfuse shows one named trace instead of one row per model call.
+_langfuse_trace: contextvars.ContextVar[Optional[Dict[str, str]]] = contextvars.ContextVar(
+    "jobspy_langfuse_trace", default=None
+)
 
 
 def agent_from_label(label: str) -> str:
@@ -100,7 +107,9 @@ def setup_tracing() -> None:
     with _LOCK:
         if _provider is not None:
             return
-        endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+        from ..config import OTEL_ENDPOINT
+
+        endpoint = (OTEL_ENDPOINT or "").strip()
         if not endpoint:
             return
         try:
@@ -191,7 +200,8 @@ def _open(name: str, attributes: Dict[str, Any]) -> Iterator[Any]:
         tracer = _provider.get_tracer("jobspy-lite")
         otel_cm = tracer.start_as_current_span(name)
         span = otel_cm.__enter__()
-        for key, value in attributes.items():
+        merged = _with_trace_attributes(attributes)
+        for key, value in merged.items():
             if value is not None:
                 span.set_attribute(key, _clip(value))
     except Exception:
@@ -212,11 +222,42 @@ def _open(name: str, attributes: Dict[str, Any]) -> Iterator[Any]:
             logger.exception("Could not end span %s", name)
 
 
+def _with_trace_attributes(attributes: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp the open Langfuse trace name and session onto this span."""
+    current = _langfuse_trace.get()
+    if not current:
+        return attributes
+    merged = dict(attributes)
+    merged.setdefault("langfuse.trace.name", current["name"])
+    merged.setdefault("langfuse.session.id", current["session_id"])
+    return merged
+
+
+@contextmanager
+def _trace_header(name: str, session_id: str) -> Iterator[None]:
+    token = _langfuse_trace.set({"name": name, "session_id": session_id})
+    try:
+        yield
+    finally:
+        _langfuse_trace.reset(token)
+
+
 @contextmanager
 def pipeline_span(run_id: str, trigger: str) -> Iterator[Any]:
     """Root span for one pipeline run. Yields None when tracing is off."""
-    with _open("jobspy.pipeline", {"run_id": run_id, "trigger": trigger}) as span:
-        yield span
+    header = f"pipeline · {trigger}"
+    with _trace_header(header, run_id):
+        with _open(
+            header,
+            {
+                "run_id": run_id,
+                "trigger": trigger,
+                "langfuse.trace.name": header,
+                "langfuse.session.id": run_id,
+                "langfuse.observation.type": "span",
+            },
+        ) as span:
+            yield span
 
 
 def annotate_pipeline(span: Any, summary: Dict[str, Any]) -> None:
@@ -243,21 +284,37 @@ def annotate_pipeline(span: Any, summary: Dict[str, Any]) -> None:
 
 
 @contextmanager
-def rewrite_span(rewrite_id: str, job_key: str, max_tries: int) -> Iterator[Any]:
-    """Root span for one resume rewrite. Not nested under a pipeline run."""
-    with _open(
-        "jobspy.rewrite",
-        {
-            "rewrite_id": rewrite_id,
-            "job_key": job_key,
-            "max_tries": int(max_tries),
-        },
-    ) as span:
-        try:
-            yield span
-        except Exception as exc:
-            _mark_error(span, str(exc))
-            raise
+def rewrite_span(
+    rewrite_id: str,
+    job_key: str,
+    max_tries: int,
+    title: str = "",
+) -> Iterator[Any]:
+    """One trace for a job's resume rewrite. Model calls are children of it.
+
+    ``title`` is the header Langfuse shows, usually ``Role @ Company``.
+    The session id is the job key, so a later rewrite of the same job
+    groups with this one.
+    """
+    header = f"rewrite · {title.strip() or job_key or rewrite_id}"
+    with _trace_header(header, job_key):
+        with _open(
+            header,
+            {
+                "rewrite_id": rewrite_id,
+                "job_key": job_key,
+                "max_tries": int(max_tries),
+                "langfuse.trace.name": header,
+                "langfuse.session.id": job_key,
+                "langfuse.observation.type": "span",
+                "langfuse.trace.metadata.job_key": job_key,
+            },
+        ) as span:
+            try:
+                yield span
+            except Exception as exc:
+                _mark_error(span, str(exc))
+                raise
 
 
 def finish_rewrite(span: Any, status: str) -> None:
@@ -286,12 +343,13 @@ def parse_span(label: str, model: str) -> Iterator[Any]:
         yield None
         return
     with _open(
-        "gen_ai.chat",
+        label or "gen_ai.chat",
         {
             "gen_ai.operation.name": "chat",
             "gen_ai.request.model": model or "",
             "jobspy.agent": agent_from_label(label),
             "jobspy.label": label or "",
+            "langfuse.observation.type": "generation",
         },
     ) as span:
         yield span

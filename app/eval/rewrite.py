@@ -6,7 +6,6 @@
 
 import argparse
 import json
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -197,7 +196,7 @@ def run_eval(
     checker_model: str = "",
 ) -> Path:
     """Score the frozen set. Does not update job scores or the scoring resume."""
-    from app.config import AI_BASE_URL, AI_MODEL, agent_defaults
+    from app.config import AI_MODEL, CHECKER_BASE_URL, CHECKER_MODEL, agent_defaults
     from app import storage
 
     folder = eval_dir()
@@ -219,15 +218,14 @@ def run_eval(
         def complete(messages, text_format, label):  # type: ignore[no-redef]
             return client.parse(messages, text_format, label=label)
     if checker is None:
-        checker_model = os.environ.get("CHECKER_MODEL") or AI_MODEL
-        checker_base = os.environ.get("CHECKER_BASE_URL") or AI_BASE_URL
+        checker_model = CHECKER_MODEL
+        checker_base = CHECKER_BASE_URL
         from app.agent.ai_client import AIClient
 
         checker_client = AIClient(
             {
                 "ai_model": checker_model,
                 "ai_base_url": checker_base,
-                "api_key": os.environ.get("NVIDIA_API_KEY"),
                 "timeout_seconds": 90,
                 "rate_limited": "api.nvidia.com" in checker_base,
             }
@@ -287,7 +285,7 @@ def run_eval(
         )
     meta = {
         "rewrite_model": rewrite_model or agent.get("rewrite_model") or AI_MODEL,
-        "checker_model": checker_model or os.environ.get("CHECKER_MODEL") or AI_MODEL,
+        "checker_model": checker_model or CHECKER_MODEL,
         "max_tries": max_tries,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

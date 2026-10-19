@@ -47,7 +47,7 @@ from starlette.requests import Request
 from . import notify, scheduler, storage
 from .agent.resume_io import extract_text, load_resume_docx, save_resume_docx
 from .agent.tracing import finish_rewrite, rewrite_span, setup_tracing, shutdown_tracing
-from .config import EXCEL_PATH, PROJECT_ROOT, clamp_int
+from .config import EXCEL_PATH, PROJECT_ROOT, clamp_int, normalize_provider
 from .pipeline import PipelineContext, request_shutdown, run_pipeline, wait_for_idle
 from .schemas import (
     ApplicationImport,
@@ -343,7 +343,12 @@ def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
             return client.parse(messages, text_format, label=label)
 
         original = load_resume_docx()
-        with rewrite_span(rewrite_id, job_key, max_tries) as trace_span:
+        title = " @ ".join(
+            part
+            for part in ((job or {}).get("title"), (job or {}).get("company"))
+            if part
+        )
+        with rewrite_span(rewrite_id, job_key, max_tries, title=title) as trace_span:
             result = run_loop(
                 resume_text=resume_text,
                 job=job or {},
@@ -679,6 +684,15 @@ def update_settings(settings: SettingsIn) -> Dict[str, Any]:
             params.pop("ai_model", None)
         base_url = str(params.get("ai_base_url") or "").strip()
         params["ai_base_url"] = base_url  # empty string = fall back to env default
+        raw_provider = str(params.get("ai_provider") or "").strip().lower()
+        if raw_provider == "custom":
+            params["ai_provider"] = "custom"
+        else:
+            provider = normalize_provider(raw_provider)
+            if provider:
+                params["ai_provider"] = provider
+            else:
+                params.pop("ai_provider", None)
         rate = params.get("ai_rate_limit_per_min")
         try:
             params["ai_rate_limit_per_min"] = max(0, int(rate)) if rate is not None else 30

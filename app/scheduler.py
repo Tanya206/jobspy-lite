@@ -23,18 +23,12 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger  # noqa: F401 (kept for API compat)
 
 from . import storage
+from .config import SCHEDULER_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG: Dict[str, Any] = {
-    "mode": "interval",          # "interval" | "cron"
-    "interval_minutes": 120,
-    "active_from": 8,            # hour-of-day window start
-    "active_to": 22,             # hour-of-day window end
-    "cron_expression": "0 */2 * * *",
-    "timezone": "Asia/Kolkata",  # all hours/cron fields are in THIS zone
-    "enabled": False,
-}
+# Hours and cron fields are interpreted in ``timezone``.
+DEFAULT_CONFIG: Dict[str, Any] = dict(SCHEDULER_DEFAULTS)
 
 SCHEDULER_JOB_ID = "jobspy-lite-pipeline"
 

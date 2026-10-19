@@ -1,8 +1,10 @@
-"""Simple OpenAI-compatible client (default: NVIDIA NIM), using native
-structured outputs via chat.completions.parse()."""
+"""OpenAI SDK client for NVIDIA NIM or the OpenAI API.
+
+Structured outputs go through chat.completions.parse(). The base URL picks
+the key: OPENAI_API_KEY for api.openai.com, NVIDIA_API_KEY otherwise.
+"""
 
 import logging
-import os
 import random
 import time
 from pathlib import Path
@@ -11,8 +13,8 @@ from typing import Any, Dict, Optional
 import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
-from pydantic import BaseModel
 
+from ..config import AI_BASE_URL, AI_MODEL, AI_TIMEOUT_SECONDS, resolve_api_key
 from .observability import AI_METRICS
 from .rate_limiter import NVIDIA_RATE_LIMITER
 from .tracing import finish_parse, note_parse_attempt, parse_span
@@ -39,14 +41,13 @@ class AIClient:
         load_dotenv(project_root / ".env")
 
         config = config or {}
-        self.ai_model = config.get("ai_model", "")
-        api_key = config.get("api_key") or os.environ.get("NVIDIA_API_KEY")
-        base_url = config.get(
-            "ai_base_url",
-            os.environ.get("AI_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-        )
+        # Blank model or URL means "use the env preset" (NVIDIA, or OpenAI
+        # when AI_PROVIDER=openai). A stored empty string must not stick.
+        self.ai_model = str(config.get("ai_model") or "").strip() or AI_MODEL
+        base_url = str(config.get("ai_base_url") or "").strip() or AI_BASE_URL
+        api_key = resolve_api_key(base_url, config.get("api_key"))
         self.base_url = base_url
-        timeout_s = float(config.get("timeout_seconds") or 90.0)
+        timeout_s = float(config.get("timeout_seconds") or AI_TIMEOUT_SECONDS)
         # Scoring always shares the NVIDIA limiter. A rewrite pointed at
         # another host must not take a slot on that limiter.
         self._rate_limited = bool(config.get("rate_limited", True))

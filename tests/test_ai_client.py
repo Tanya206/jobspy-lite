@@ -91,6 +91,49 @@ def test_parse_gives_up_after_max_attempts(monkeypatch):
     assert calls["n"] == MAX_PARSE_ATTEMPTS
 
 
+def test_openai_base_url_uses_openai_api_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-key")
+    client = AIClient(
+        config={
+            "ai_model": "gpt-4.1-mini",
+            "ai_base_url": "https://api.openai.com/v1",
+        }
+    )
+    assert client._client.api_key == "sk-openai"
+    assert str(client._client.base_url).rstrip("/") == "https://api.openai.com/v1"
+
+
+def test_nvidia_base_url_keeps_nvidia_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-key")
+    client = AIClient(
+        config={
+            "ai_model": "nvidia/nemotron-3-super-120b-a12b",
+            "ai_base_url": "https://integrate.api.nvidia.com/v1",
+        }
+    )
+    assert client._client.api_key == "nv-key"
+
+
+def test_explicit_api_key_wins(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    client = AIClient(
+        config={
+            "api_key": "explicit-key",
+            "ai_model": "gpt-4.1-mini",
+            "ai_base_url": "https://api.openai.com/v1",
+        }
+    )
+    assert client._client.api_key == "explicit-key"
+
+
+def test_blank_model_and_url_fall_back_to_preset():
+    client = AIClient(config={"api_key": "test-key", "ai_model": "  ", "ai_base_url": ""})
+    assert client.ai_model
+    assert client.base_url.startswith("http")
+
+
 def test_parse_acquires_a_rate_limit_slot_on_every_attempt(monkeypatch):
     """Retries must not skip the shared limiter (that is what caused 429 bursts)."""
     client = _client()
