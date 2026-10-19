@@ -74,7 +74,7 @@ _FALLBACKS: Dict[str, Any] = {
         "timezone": "Asia/Kolkata",
         "enabled": False,
     },
-    "tracing": {"otel_endpoint": ""},
+    "tracing": {"otel_endpoint": "", "capture_content": True},
 }
 
 
@@ -226,6 +226,7 @@ def resolve_settings(data: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]
             "enabled": _as_bool(scheduler.get("enabled"), False),
         },
         "otel_endpoint": _as_str(tracing.get("otel_endpoint"), ""),
+        "otel_capture_content": _as_bool(tracing.get("capture_content"), True),
     }
 
 
@@ -280,6 +281,7 @@ EXCEL_PATH: Path = DATA_DIR / "jobs.xlsx"
 
 SCHEDULER_DEFAULTS: Dict[str, Any] = dict(_SETTINGS["scheduler"])
 OTEL_ENDPOINT: str = _SETTINGS["otel_endpoint"]
+OTEL_CAPTURE_CONTENT: bool = _SETTINGS["otel_capture_content"]
 
 TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")

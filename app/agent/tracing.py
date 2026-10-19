@@ -16,14 +16,20 @@ root is dropped. Langfuse gets ``langfuse.trace.name`` and
 ``langfuse.session.id`` on every span so the steps stay under one header.
 
 Run totals live only on the pipeline root. Model, agent, attempts, HTTP
-status, and token counts live only on the chat span. Prompts, completions,
-and resume text are never attributes.
+status, and token counts live only on the chat span.
+
+When ``tracing.capture_content`` is on (the default), chat spans carry the
+request messages as input and the parsed response as output. Job roots
+carry the job (plus resume text or rewrite options) as input and the
+agent's result as output, at both observation and trace level. The pipeline
+root never carries content.
 """
 
 import base64
 import binascii
 import contextvars
 import hashlib
+import json
 import logging
 import os
 import re
@@ -36,9 +42,11 @@ logger = logging.getLogger(__name__)
 _LOCK = threading.Lock()
 _provider: Any = None
 _enabled = False
+_capture_content = False
 
 _KNOWN_AGENTS = frozenset({"experience", "fit", "rewrite", "checker"})
 _TEXT_LIMIT = 300
+_CONTENT_LIMIT = 100_000
 # Langfuse drops session ids of 200 characters or more, and non-ASCII ones.
 _SESSION_TITLE_LIMIT = 120
 
@@ -141,11 +149,11 @@ def otlp_headers(raw: str) -> Optional[Dict[str, str]]:
 
 def setup_tracing() -> None:
     """Start the OTLP HTTP exporter. No-op when unset or already started."""
-    global _provider, _enabled
+    global _provider, _enabled, _capture_content
     with _LOCK:
         if _provider is not None:
             return
-        from ..config import OTEL_ENDPOINT
+        from ..config import OTEL_CAPTURE_CONTENT, OTEL_ENDPOINT
 
         endpoint = (OTEL_ENDPOINT or "").strip()
         if not endpoint:
@@ -170,16 +178,21 @@ def setup_tracing() -> None:
             )
             _provider = provider
             _enabled = True
-            logger.info("OpenTelemetry export enabled (%s)", url)
+            _capture_content = bool(OTEL_CAPTURE_CONTENT)
+            logger.info(
+                "OpenTelemetry export enabled (%s, content %s)",
+                url,
+                "on" if _capture_content else "off",
+            )
         except Exception:
             logger.exception(
                 "OpenTelemetry setup failed; traces will not be exported"
             )
 
 
-def install_span_exporter(exporter: Any) -> None:
+def install_span_exporter(exporter: Any, capture_content: bool = True) -> None:
     """Send ended spans straight to ``exporter``. Used by tests."""
-    global _provider, _enabled
+    global _provider, _enabled, _capture_content
     with _LOCK:
         _shutdown_locked()
         from opentelemetry.sdk.resources import Resource
@@ -192,6 +205,7 @@ def install_span_exporter(exporter: Any) -> None:
         provider.add_span_processor(SimpleSpanProcessor(exporter))
         _provider = provider
         _enabled = True
+        _capture_content = capture_content
 
 
 def shutdown_tracing() -> None:
@@ -201,10 +215,11 @@ def shutdown_tracing() -> None:
 
 
 def _shutdown_locked() -> None:
-    global _provider, _enabled
+    global _provider, _enabled, _capture_content
     provider = _provider
     _provider = None
     _enabled = False
+    _capture_content = False
     if provider is None:
         return
     try:
@@ -217,6 +232,42 @@ def _clip(value: Any) -> Any:
     if isinstance(value, bool) or isinstance(value, (int, float)):
         return value
     return str(value)[:_TEXT_LIMIT]
+
+
+def _json_default(value: Any) -> Any:
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return dump(mode="json")
+    return str(value)
+
+
+def _content(value: Any) -> str:
+    """JSON text for an input/output attribute, cut at ``_CONTENT_LIMIT``."""
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, default=_json_default, ensure_ascii=False)
+    if len(text) > _CONTENT_LIMIT:
+        text = text[:_CONTENT_LIMIT] + "…[truncated]"
+    return text
+
+
+def _set_content(span: Any, kind: str, value: Any, trace_level: bool) -> None:
+    """Set ``kind`` (input or output) on the span. No-op when capture is off."""
+    if span is None or not _capture_content or value is None:
+        return
+    try:
+        text = _content(value)
+        span.set_attribute(f"langfuse.observation.{kind}", text)
+        if trace_level:
+            span.set_attribute(f"langfuse.trace.{kind}", text)
+    except Exception:
+        logger.exception("Could not record span %s", kind)
+
+
+def record_output(span: Any, value: Any) -> None:
+    """Result of a job trace. Shown as the trace output in Langfuse."""
+    _set_content(span, "output", value, trace_level=True)
 
 
 def _mark_error(span: Any, message: str) -> None:
@@ -342,6 +393,7 @@ def _job_trace(
     job_key: str,
     title: str,
     attributes: Dict[str, Any],
+    inputs: Any = None,
 ) -> Iterator[Any]:
     """New root trace ``name`` in the job's session. Errors mark the root."""
     session_id = job_session_id(job_key, title)
@@ -357,6 +409,7 @@ def _job_trace(
     merged.update(attributes)
     with _trace_header(name, session_id):
         with _open(name, merged, root=True) as span:
+            _set_content(span, "input", inputs, trace_level=True)
             try:
                 yield span
             except Exception as exc:
@@ -367,14 +420,26 @@ def _job_trace(
 @contextmanager
 def experience_match_span(job_key: str, job: Optional[Dict[str, Any]] = None) -> Iterator[Any]:
     """``Experience Match`` trace for one job's required-years estimate."""
-    with _job_trace(EXPERIENCE_MATCH, job_key, job_title(job), {}) as span:
+    with _job_trace(
+        EXPERIENCE_MATCH, job_key, job_title(job), {}, inputs={"job": job}
+    ) as span:
         yield span
 
 
 @contextmanager
-def resume_match_span(job_key: str, job: Optional[Dict[str, Any]] = None) -> Iterator[Any]:
+def resume_match_span(
+    job_key: str,
+    job: Optional[Dict[str, Any]] = None,
+    resume_text: Optional[str] = None,
+) -> Iterator[Any]:
     """``Resume Match`` trace for one job's suitability score."""
-    with _job_trace(RESUME_MATCH, job_key, job_title(job), {}) as span:
+    with _job_trace(
+        RESUME_MATCH,
+        job_key,
+        job_title(job),
+        {},
+        inputs={"job": job, "resume_text": resume_text},
+    ) as span:
         yield span
 
 
@@ -384,11 +449,13 @@ def rewrite_span(
     job_key: str,
     max_tries: int,
     title: str = "",
+    inputs: Optional[Dict[str, Any]] = None,
 ) -> Iterator[Any]:
     """``Resume Rewrite`` trace for one rewrite. Model calls are children of it.
 
     ``title`` is usually ``Role @ Company``. It shares the job's session
     with that job's match traces, and later rewrites group there too.
+    ``inputs`` is what the loop was given (job, resume text, options).
     """
     with _job_trace(
         RESUME_REWRITE,
@@ -399,14 +466,16 @@ def rewrite_span(
             "max_tries": int(max_tries),
             "langfuse.trace.metadata.rewrite_id": rewrite_id,
         },
+        inputs=inputs,
     ) as span:
         yield span
 
 
-def finish_rewrite(span: Any, status: str) -> None:
-    """Record the rewrite row's final status on the root span."""
+def finish_rewrite(span: Any, status: str, output: Any = None) -> None:
+    """Record the rewrite row's final status and result on the root span."""
     if span is None:
         return
+    record_output(span, output)
     try:
         span.set_attribute("status", status)
         if status == "error":
@@ -423,8 +492,11 @@ def _parent_open() -> bool:
 
 
 @contextmanager
-def parse_span(label: str, model: str) -> Iterator[Any]:
-    """Child chat span. Yields None when tracing is off or no root is open."""
+def parse_span(label: str, model: str, messages: Any = None) -> Iterator[Any]:
+    """Child chat span. Yields None when tracing is off or no root is open.
+
+    ``messages`` is the request, recorded as the generation input.
+    """
     if not _enabled or not _parent_open():
         yield None
         return
@@ -438,6 +510,7 @@ def parse_span(label: str, model: str) -> Iterator[Any]:
             "langfuse.observation.type": "generation",
         },
     ) as span:
+        _set_content(span, "input", messages, trace_level=False)
         yield span
 
 
@@ -469,10 +542,12 @@ def finish_parse(
     http_status: Optional[int] = None,
     usage: Any = None,
     error: Optional[str] = None,
+    output: Any = None,
 ) -> None:
-    """Close out one logical parse(): attempts, last HTTP status, tokens."""
+    """Close out one logical parse(): attempts, last HTTP status, tokens, output."""
     if span is None:
         return
+    _set_content(span, "output", output, trace_level=False)
     try:
         span.set_attribute("jobspy.attempts", int(attempts))
         if http_status is not None:

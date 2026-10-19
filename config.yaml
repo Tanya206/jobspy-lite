@@ -64,3 +64,6 @@ tracing:
   # Empty disables export. Auth stays in .env as OTEL_EXPORTER_OTLP_HEADERS.
   # Langfuse needs the /api/public/otel path, not the host alone.
   otel_endpoint: https://us.cloud.langfuse.com/api/public/otel
+  # Send prompts, model outputs, job postings, and resume text as span
+  # input/output. Set false to export only timings, status, and token counts.
+  capture_content: true

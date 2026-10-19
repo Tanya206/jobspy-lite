@@ -43,4 +43,7 @@ def test_scrape_lists_and_scheduler_come_from_the_mapping():
     assert resolved["scheduler"]["interval_minutes"] == 30
     assert resolved["scheduler"]["timezone"] == "UTC"
     assert resolved["otel_endpoint"] == "http://localhost:4318"
+    assert resolved["otel_capture_content"] is True
     assert resolved["rescore_after_hours"] == 72
+    off = resolve_settings({"tracing": {"capture_content": False}})
+    assert off["otel_capture_content"] is False

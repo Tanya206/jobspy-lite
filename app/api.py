@@ -350,7 +350,18 @@ def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
 
         original = load_resume_docx()
         title = job_title(job)
-        with rewrite_span(rewrite_id, job_key, max_tries, title=title) as trace_span:
+        trace_inputs = {
+            "job": job,
+            "resume_text": resume_text,
+            "additional_info": additional or "",
+            "years": context["years"],
+            "industry": context["industry"],
+            "company_type": payload.company_type or "",
+            "max_tries": max_tries,
+        }
+        with rewrite_span(
+            rewrite_id, job_key, max_tries, title=title, inputs=trace_inputs
+        ) as trace_span:
             result = run_loop(
                 resume_text=resume_text,
                 job=job or {},
@@ -387,7 +398,17 @@ def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
                     "status": status,
                 },
             )
-            finish_rewrite(trace_span, status)
+            finish_rewrite(
+                trace_span,
+                status,
+                output={
+                    "status": status,
+                    "winning_total": result["winning_total"],
+                    "winning_patches": winning,
+                    "docx_path": docx_path,
+                    "error": result["error"],
+                },
+            )
     except Exception as exc:  # noqa: BLE001 - the row must leave the running state
         logger.exception("Resume rewrite failed for %s", job_key)
         storage.update_resume_rewrite(

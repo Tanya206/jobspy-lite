@@ -36,6 +36,7 @@ from .agent.tracing import (
     annotate_pipeline,
     experience_match_span,
     pipeline_span,
+    record_output,
     resume_match_span,
 )
 from .config import RESCORE_AFTER_HOURS, clamp_int
@@ -230,8 +231,9 @@ def _screen_one(
     required = None
     trace_key = key or job_key(job)
     try:
-        with experience_match_span(trace_key, job):
+        with experience_match_span(trace_key, job) as span:
             required = agent._estimate_required_years(job)
+            record_output(span, {"required_years": required})
     except Exception as exc:
         raise ScoreFailure(
             f"experience agent: {exc}", status=_http_status(exc)
@@ -245,8 +247,9 @@ def _screen_one(
     annotated["experience_match"] = matched
     if matched:
         try:
-            with resume_match_span(trace_key, job):
+            with resume_match_span(trace_key, job, context.resume_text) as span:
                 suitability = agent.assess_suitability(job, context.resume_text)
+                record_output(span, suitability)
         except Exception as exc:
             raise ScoreFailure(
                 f"suitability agent: {exc}", status=_http_status(exc)

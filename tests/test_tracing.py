@@ -1,5 +1,6 @@
 """OpenTelemetry span shape. No network and no collector."""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -12,10 +13,12 @@ from app.agent.ai_client import AIClient
 from app.agent.tracing import (
     annotate_pipeline,
     experience_match_span,
+    finish_rewrite,
     install_span_exporter,
     job_session_id,
     otlp_headers,
     pipeline_span,
+    record_output,
     resume_match_span,
     rewrite_span,
     setup_tracing,
@@ -103,7 +106,7 @@ def test_match_traces_are_separate_roots_in_the_job_session(monkeypatch):
     monkeypatch.setattr("app.agent.ai_client.time.sleep", lambda _s: None)
     monkeypatch.setattr("app.agent.ai_client.MAX_PARSE_ATTEMPTS", 3)
     exporter = MemoryExporter()
-    install_span_exporter(exporter)
+    install_span_exporter(exporter, capture_content=False)
     client = _client()
     calls = {"n": 0}
 
@@ -197,6 +200,55 @@ def test_match_traces_are_separate_roots_in_the_job_session(monkeypatch):
 
     exported = "\n".join(_blob(span) for span in finished)
     assert SECRET not in exported
+
+
+def test_content_capture_records_inputs_and_outputs(monkeypatch):
+    exporter = MemoryExporter()
+    install_span_exporter(exporter)
+    client = _client()
+    monkeypatch.setattr(
+        client._client.beta.chat.completions, "parse", lambda **_kwargs: _ok_response()
+    )
+
+    with resume_match_span(JOB_KEY, JOB, SECRET) as root:
+        client.parse(
+            messages=[{"role": "user", "content": SECRET}],
+            text_format=Out,
+            label="fit[Role @ Co]",
+        )
+        record_output(root, {"score": 7})
+    with rewrite_span("rw-2", JOB_KEY, 2, title="AI Engineer @ Acme", inputs={"job": JOB}) as rw:
+        finish_rewrite(rw, "done", output={"status": "done", "winning_total": 9})
+
+    finished = exporter.get_finished_spans()
+    by_name = {span.name: span for span in finished}
+    chat = by_name["fit[Role @ Co]"].attributes
+    assert json.loads(chat["langfuse.observation.input"]) == [
+        {"role": "user", "content": SECRET}
+    ]
+    assert json.loads(chat["langfuse.observation.output"]) == {"score": 7}
+    assert "langfuse.trace.input" not in chat
+
+    match = by_name["Resume Match"].attributes
+    for key in ("langfuse.observation.input", "langfuse.trace.input"):
+        assert json.loads(match[key]) == {"job": JOB, "resume_text": SECRET}
+    for key in ("langfuse.observation.output", "langfuse.trace.output"):
+        assert json.loads(match[key]) == {"score": 7}
+
+    rewrite = by_name["Resume Rewrite"].attributes
+    assert json.loads(rewrite["langfuse.trace.input"]) == {"job": JOB}
+    assert json.loads(rewrite["langfuse.trace.output"])["winning_total"] == 9
+
+
+def test_long_content_is_truncated(monkeypatch):
+    monkeypatch.setattr("app.agent.tracing._CONTENT_LIMIT", 50)
+    exporter = MemoryExporter()
+    install_span_exporter(exporter)
+    with experience_match_span(JOB_KEY, {"title": "x" * 500}):
+        pass
+    root = exporter.get_finished_spans()[0]
+    assert root.attributes["langfuse.trace.input"].endswith("…[truncated]")
+    assert len(root.attributes["langfuse.trace.input"]) < 70
 
 
 def test_worker_thread_job_trace_records_the_run(monkeypatch):

@@ -85,7 +85,7 @@ class AIClient:
 
         # One child span for the whole retry loop. Dropped when no pipeline
         # or rewrite root is open, so a stray call is not its own trace.
-        with parse_span(label, self.ai_model) as span:
+        with parse_span(label, self.ai_model, messages=messages) as span:
             for attempt in range(1, MAX_PARSE_ATTEMPTS + 1):
                 waited = NVIDIA_RATE_LIMITER.acquire() if self._rate_limited else 0.0
                 if waited > 1.0:
@@ -122,6 +122,7 @@ class AIClient:
                         ok=True,
                         attempts=attempt,
                         usage=getattr(response, "usage", None),
+                        output=result,
                     )
                     return result
                 except Exception as exc:
