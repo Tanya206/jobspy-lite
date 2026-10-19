@@ -674,12 +674,13 @@ def scheduler_toggle(enabled: bool) -> SchedulerStatus:
 # --------------------------------------------------------------------------- #
 @app.get("/settings")
 def get_settings() -> Dict[str, Any]:
-    from .config import agent_defaults, scrape_defaults
+    from .config import AI_MODEL, REWRITE_MODEL, agent_defaults, scrape_defaults
 
     context = PipelineContext()
     return {
         "scrape_params": {**scrape_defaults(), **(storage.get_setting("scrape_params") or {})},
         "agent_params": {**agent_defaults(), **(storage.get_setting("agent_params") or {})},
+        "rewrite_model_default": REWRITE_MODEL or AI_MODEL,
         "experience_min_years": context.experience_min,
         "experience_max_years": context.experience_max,
         "score_threshold": context.score_threshold,

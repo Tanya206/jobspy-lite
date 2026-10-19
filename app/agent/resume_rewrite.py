@@ -361,7 +361,7 @@ def rewrite_target(model: str, base_url: str, agent_params: Dict[str, Any]) -> D
 
 
 def make_client(model: str, base_url: str, agent_params: Dict[str, Any]) -> AIClient:
-    from ..config import REWRITE_TIMEOUT_SECONDS
+    from ..config import REWRITE_REASONING_EFFORT, REWRITE_TIMEOUT_SECONDS
 
     target = rewrite_target(model, base_url, agent_params)
     return AIClient(
@@ -370,6 +370,7 @@ def make_client(model: str, base_url: str, agent_params: Dict[str, Any]) -> AICl
             "ai_base_url": target["base_url"],
             "api_key": target["api_key"],
             "timeout_seconds": REWRITE_TIMEOUT_SECONDS,
+            "reasoning_effort": REWRITE_REASONING_EFFORT,
             "rate_limited": target["rate_limited"],
         }
     )

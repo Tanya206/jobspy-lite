@@ -134,6 +134,76 @@ def test_blank_model_and_url_fall_back_to_preset():
     assert client.base_url.startswith("http")
 
 
+def _capture_kwargs(monkeypatch, client):
+    seen = {}
+
+    def parse(**kwargs):
+        seen.update(kwargs)
+        return _ok_response()
+
+    monkeypatch.setattr(client._client.beta.chat.completions, "parse", parse)
+    return seen
+
+
+@pytest.mark.parametrize("model", ["gpt-5-nano", "gpt-5-mini", "openai/o4-mini"])
+def test_reasoning_models_get_effort_not_temperature(monkeypatch, model):
+    client = AIClient(
+        config={
+            "api_key": "k",
+            "ai_model": model,
+            "ai_base_url": "http://localhost:9/v1",
+            "reasoning_effort": "Minimal",
+        }
+    )
+    seen = _capture_kwargs(monkeypatch, client)
+    client.parse(messages=[], text_format=Out, temperature=0.2)
+    assert "temperature" not in seen
+    assert seen["reasoning_effort"] == "minimal"
+
+
+def test_blank_effort_sends_neither(monkeypatch):
+    client = AIClient(
+        config={
+            "api_key": "k",
+            "ai_model": "gpt-5-nano",
+            "ai_base_url": "http://localhost:9/v1",
+            "reasoning_effort": "",
+        }
+    )
+    seen = _capture_kwargs(monkeypatch, client)
+    client.parse(messages=[], text_format=Out)
+    assert "temperature" not in seen
+    assert "reasoning_effort" not in seen
+
+
+@pytest.mark.parametrize("model", ["gpt-4.1-mini", "gpt-5-chat-latest", "nvidia/nemotron-3-super-120b-a12b"])
+def test_other_models_keep_temperature(monkeypatch, model):
+    client = AIClient(
+        config={
+            "api_key": "k",
+            "ai_model": model,
+            "ai_base_url": "http://localhost:9/v1",
+            "reasoning_effort": "low",
+        }
+    )
+    seen = _capture_kwargs(monkeypatch, client)
+    client.parse(messages=[], text_format=Out, temperature=0.2)
+    assert seen["temperature"] == 0.2
+    assert "reasoning_effort" not in seen
+
+
+def test_rewrite_client_uses_mini_with_its_own_effort(monkeypatch):
+    from app.agent import resume_rewrite
+
+    monkeypatch.setattr("app.config.REWRITE_MODEL", "gpt-5-mini")
+    monkeypatch.setattr("app.config.REWRITE_BASE_URL", "")
+    monkeypatch.setattr("app.config.AI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setattr("app.config.REWRITE_REASONING_EFFORT", "medium")
+    client = resume_rewrite.make_client("", "", {"rewrite_model": "", "rewrite_base_url": ""})
+    assert client.ai_model == "gpt-5-mini"
+    assert client.reasoning_effort == "medium"
+
+
 def test_parse_acquires_a_rate_limit_slot_on_every_attempt(monkeypatch):
     """Retries must not skip the shared limiter (that is what caused 429 bursts)."""
     client = _client()

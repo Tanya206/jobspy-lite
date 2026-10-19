@@ -14,7 +14,13 @@ import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from ..config import AI_BASE_URL, AI_MODEL, AI_TIMEOUT_SECONDS, resolve_api_key
+from ..config import (
+    AI_BASE_URL,
+    AI_MODEL,
+    AI_REASONING_EFFORT,
+    AI_TIMEOUT_SECONDS,
+    resolve_api_key,
+)
 from .observability import AI_METRICS
 from .rate_limiter import NVIDIA_RATE_LIMITER
 from .tracing import finish_parse, note_parse_attempt, parse_span
@@ -31,6 +37,10 @@ MAX_RETRY_DELAY_SECONDS = 120
 RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
 
 
+def is_reasoning_model(model: str) -> bool:
+    """OpenAI reasoning models (gpt-5*, o-series) reject any temperature but 1."""
+    name = (model or "").strip().lower().rsplit("/", 1)[-1]
+    return name.startswith(("gpt-5", "o1", "o3", "o4")) and "chat" not in name
 
 
 class AIClient:
@@ -51,6 +61,10 @@ class AIClient:
         # Scoring always shares the NVIDIA limiter. A rewrite pointed at
         # another host must not take a slot on that limiter.
         self._rate_limited = bool(config.get("rate_limited", True))
+        effort = config.get("reasoning_effort")
+        self.reasoning_effort = str(
+            AI_REASONING_EFFORT if effort is None else effort
+        ).strip().lower()
 
         # max_retries=0: the SDK's internal retries bypass our rate limiter,
         # which let bursts exceed NVIDIA's cap (429s). Our parse() retry loop
@@ -82,6 +96,12 @@ class AIClient:
         every log line so retries and rate-limit waits are traceable per job.
         """
         last_error = None
+        sampling: Dict[str, Any] = {}
+        if is_reasoning_model(self.ai_model):
+            if self.reasoning_effort:
+                sampling["reasoning_effort"] = self.reasoning_effort
+        else:
+            sampling["temperature"] = temperature
 
         # One child span for the whole retry loop. Dropped when no pipeline
         # or rewrite root is open, so a stray call is not its own trace.
@@ -100,7 +120,7 @@ class AIClient:
                         model=self.ai_model,
                         messages=messages,
                         response_format=text_format,
-                        temperature=temperature,
+                        **sampling,
                     )
                     AI_METRICS.record_attempt(time.monotonic() - started)
                     message = response.choices[0].message

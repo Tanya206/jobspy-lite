@@ -6,9 +6,25 @@ from app.config import resolve_settings
 def test_openai_preset_fills_blank_model_and_url():
     resolved = resolve_settings({"ai": {"provider": "openai"}})
     assert resolved["ai_provider"] == "openai"
-    assert resolved["ai_model"] == "gpt-4.1-mini"
+    assert resolved["ai_model"] == "gpt-5-nano"
     assert resolved["ai_base_url"] == "https://api.openai.com/v1"
-    assert resolved["checker_model"] == "gpt-4.1-mini"
+    assert resolved["checker_model"] == "gpt-5-nano"
+    assert resolved["rewrite_model"] == "gpt-5-mini"
+    assert resolved["ai_reasoning_effort"] == "low"
+    assert resolved["rewrite_reasoning_effort"] == "medium"
+
+
+def test_nvidia_rewrite_falls_back_to_the_scoring_model():
+    resolved = resolve_settings({"ai": {"provider": "nvidia"}})
+    assert resolved["rewrite_model"] == ""
+
+
+def test_explicit_rewrite_model_overrides_the_preset():
+    resolved = resolve_settings(
+        {"ai": {"provider": "openai", "rewrite": {"model": "gpt-5", "reasoning_effort": ""}}}
+    )
+    assert resolved["rewrite_model"] == "gpt-5"
+    assert resolved["rewrite_reasoning_effort"] == ""
 
 
 def test_explicit_model_overrides_the_preset():

@@ -24,13 +24,19 @@ load_dotenv(PROJECT_ROOT / ".env")
 # Known provider endpoints. config.yaml selects one and may override the model
 # or base URL. Keys are never stored here.
 NVIDIA_MODEL = "nvidia/nemotron-3-super-120b-a12b"
-OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_MODEL = "gpt-5-nano"
+OPENAI_REWRITE_MODEL = "gpt-5-mini"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 
+# An empty rewrite_model means the rewrite uses the scoring model.
 PROVIDER_PRESETS: Dict[str, Dict[str, str]] = {
-    "nvidia": {"ai_model": NVIDIA_MODEL, "ai_base_url": NVIDIA_BASE_URL},
-    "openai": {"ai_model": OPENAI_MODEL, "ai_base_url": OPENAI_BASE_URL},
+    "nvidia": {"ai_model": NVIDIA_MODEL, "ai_base_url": NVIDIA_BASE_URL, "rewrite_model": ""},
+    "openai": {
+        "ai_model": OPENAI_MODEL,
+        "ai_base_url": OPENAI_BASE_URL,
+        "rewrite_model": OPENAI_REWRITE_MODEL,
+    },
 }
 
 # Used only when config.yaml omits a key.
@@ -42,7 +48,14 @@ _FALLBACKS: Dict[str, Any] = {
         "rate_limit_per_min": 30,
         "max_workers": 4,
         "timeout_seconds": 90,
-        "rewrite": {"model": "", "base_url": "", "max_tries": 3, "timeout_seconds": 180},
+        "reasoning_effort": "low",
+        "rewrite": {
+            "model": "",
+            "base_url": "",
+            "max_tries": 3,
+            "timeout_seconds": 180,
+            "reasoning_effort": "medium",
+        },
         "checker": {"model": "", "base_url": ""},
     },
     "scrape": {
@@ -193,11 +206,13 @@ def resolve_settings(data: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]
         "ai_base_url": base_url,
         "ai_rate_limit_per_min": _as_int(ai.get("rate_limit_per_min"), 30),
         "ai_timeout_seconds": _as_float(ai.get("timeout_seconds"), 90.0),
+        "ai_reasoning_effort": _as_str(ai.get("reasoning_effort"), "").lower(),
         "max_workers": _as_int(ai.get("max_workers"), 4),
-        "rewrite_model": _as_str(rewrite.get("model"), ""),
+        "rewrite_model": _as_str(rewrite.get("model"), "") or preset["rewrite_model"],
         "rewrite_base_url": _as_str(rewrite.get("base_url"), ""),
         "rewrite_max_tries": _as_int(rewrite.get("max_tries"), 3),
         "rewrite_timeout_seconds": _as_float(rewrite.get("timeout_seconds"), 180.0),
+        "rewrite_reasoning_effort": _as_str(rewrite.get("reasoning_effort"), "").lower(),
         "checker_model": checker_model,
         "checker_base_url": checker_base,
         "sites": _as_list(scrape.get("sites"), ["linkedin"]),
@@ -249,11 +264,13 @@ AI_MODEL: str = _SETTINGS["ai_model"]
 AI_BASE_URL: str = _SETTINGS["ai_base_url"]
 AI_RATE_LIMIT_PER_MIN: int = _SETTINGS["ai_rate_limit_per_min"]
 AI_TIMEOUT_SECONDS: float = _SETTINGS["ai_timeout_seconds"]
+AI_REASONING_EFFORT: str = _SETTINGS["ai_reasoning_effort"]
 MAX_WORKERS: int = _SETTINGS["max_workers"]
 REWRITE_MODEL: str = _SETTINGS["rewrite_model"]
 REWRITE_BASE_URL: str = _SETTINGS["rewrite_base_url"]
 REWRITE_MAX_TRIES: int = _SETTINGS["rewrite_max_tries"]
 REWRITE_TIMEOUT_SECONDS: float = _SETTINGS["rewrite_timeout_seconds"]
+REWRITE_REASONING_EFFORT: str = _SETTINGS["rewrite_reasoning_effort"]
 CHECKER_MODEL: str = _SETTINGS["checker_model"]
 CHECKER_BASE_URL: str = _SETTINGS["checker_base_url"]
 

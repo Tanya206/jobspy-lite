@@ -13,7 +13,7 @@ const AI_PROVIDERS = {
     baseUrl: 'https://integrate.api.nvidia.com/v1',
   },
   openai: {
-    model: 'gpt-4.1-mini',
+    model: 'gpt-5-nano',
     baseUrl: 'https://api.openai.com/v1',
   },
 }
@@ -436,7 +436,7 @@ export default function Dashboard({ onGoJobs }) {
                 rewrite model
                 <input
                   className="input" type="text"
-                  placeholder="same as scoring model"
+                  placeholder={settings.rewrite_model_default || 'same as scoring model'}
                   defaultValue={settings.agent_params.rewrite_model ?? ''}
                   onBlur={(e) => {
                     const v = e.target.value.trim()
