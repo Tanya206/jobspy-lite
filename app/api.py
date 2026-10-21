@@ -53,7 +53,13 @@ from .agent.tracing import (
     setup_tracing,
     shutdown_tracing,
 )
-from .config import EXCEL_PATH, PROJECT_ROOT, clamp_int, normalize_provider
+from .config import (
+    EXCEL_PATH,
+    PROJECT_ROOT,
+    clamp_int,
+    normalize_provider,
+    normalize_scrape_counts,
+)
 from .pipeline import PipelineContext, request_shutdown, run_pipeline, wait_for_idle
 from .schemas import (
     ApplicationImport,
@@ -678,7 +684,9 @@ def get_settings() -> Dict[str, Any]:
 
     context = PipelineContext()
     return {
-        "scrape_params": {**scrape_defaults(), **(storage.get_setting("scrape_params") or {})},
+        "scrape_params": normalize_scrape_counts(
+            {**scrape_defaults(), **(storage.get_setting("scrape_params") or {})}
+        ),
         "agent_params": {**agent_defaults(), **(storage.get_setting("agent_params") or {})},
         "rewrite_model_default": REWRITE_MODEL or AI_MODEL,
         "experience_min_years": context.experience_min,
@@ -693,11 +701,7 @@ def get_settings() -> Dict[str, Any]:
 @app.post("/settings")
 def update_settings(settings: SettingsIn) -> Dict[str, Any]:
     if settings.scrape_params is not None:
-        params = dict(settings.scrape_params)
-        if "results_wanted" in params:
-            params["results_wanted"] = clamp_int(params.get("results_wanted"), 1, 200, 15)
-        if "hours_old" in params:
-            params["hours_old"] = clamp_int(params.get("hours_old"), 1, 168, 24)
+        params = normalize_scrape_counts(dict(settings.scrape_params))
         storage.set_setting("scrape_params", params)
     if settings.agent_params is not None:
         params = dict(settings.agent_params)

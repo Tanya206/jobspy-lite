@@ -35,6 +35,14 @@ def _seed_context(resume_hash="hash1"):
     return PipelineContext()
 
 
+def test_dashboard_results_wanted_is_what_the_run_uses(temp_db):
+    """A saved scrape size above the old 200 cap has to reach the scraper."""
+    storage.set_setting("scrape_params", {"results_wanted": 600, "hours_old": 12})
+    context = PipelineContext()
+    assert context.scrape_params["results_wanted"] == 600
+    assert context.scrape_params["hours_old"] == 12
+
+
 def test_needs_scoring_rules(temp_db):
     context = _seed_context()
     assert _needs_scoring(None, context) is True  # brand new

@@ -291,9 +291,20 @@ def test_settings_clamp_results_and_workers(client):
     )
     assert updated.status_code == 200
     body = updated.json()
-    assert body["scrape_params"]["results_wanted"] == 200
+    assert body["scrape_params"]["results_wanted"] == 1000
     assert body["scrape_params"]["hours_old"] == 1
     assert body["agent_params"]["max_workers"] == 8
+
+
+def test_settings_keep_a_results_wanted_of_600(client):
+    updated = client.post(
+        "/settings",
+        json={"scrape_params": {"results_wanted": 600, "hours_old": 12}},
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["scrape_params"]["results_wanted"] == 600
+    assert body["scrape_params"]["hours_old"] == 12
 
 
 def test_purge_endpoint(client):

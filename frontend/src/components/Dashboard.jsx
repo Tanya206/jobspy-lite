@@ -18,6 +18,10 @@ const AI_PROVIDERS = {
   },
 }
 
+function blurOnEnter(event) {
+  if (event.key === 'Enter') event.currentTarget.blur()
+}
+
 function providerOf(params) {
   const url = String(params?.ai_base_url || '').toLowerCase()
   if (url.includes('api.openai.com')) return 'openai'
@@ -257,11 +261,13 @@ export default function Dashboard({ onGoJobs }) {
           <h3 className="panel__title">Scrape params</h3>
           {settings?.scrape_params ? (
             <>
-              <label className="inline">
+              <label className="stack-field">
                 search terms (comma-sep)
                 <input
                   className="input" type="text"
+                  key={(settings.scrape_params.search_terms || []).join(', ')}
                   defaultValue={(settings.scrape_params.search_terms || []).join(', ')}
+                  onKeyDown={blurOnEnter}
                   onBlur={(e) => {
                     const terms = e.target.value.split(',').map((t) => t.trim()).filter(Boolean)
                     const current = (settings.scrape_params.search_terms || []).join(', ')
@@ -271,12 +277,14 @@ export default function Dashboard({ onGoJobs }) {
                   }}
                 />
               </label>
-              <label className="inline">
+              <label className="stack-field">
                 locations (comma-sep)
                 <input
                   className="input" type="text"
                   title="One city per comma — each is scraped separately, in order."
+                  key={settings.scrape_params.location ?? ''}
                   defaultValue={settings.scrape_params.location ?? ''}
+                  onKeyDown={blurOnEnter}
                   onBlur={(e) => {
                     const v = e.target.value.trim()
                     if (v !== (settings.scrape_params.location ?? '')) {
@@ -289,8 +297,10 @@ export default function Dashboard({ onGoJobs }) {
                 <label className="inline">
                   results
                   <input
-                    className="input input--num" type="number" min="1"
+                    className="input input--num" type="number" min="1" max="1000"
+                    key={settings.scrape_params.results_wanted ?? 600}
                     defaultValue={settings.scrape_params.results_wanted ?? 600}
+                    onKeyDown={blurOnEnter}
                     onBlur={(e) => {
                       const v = parseInt(e.target.value, 10)
                       if (!Number.isNaN(v) && v !== settings.scrape_params.results_wanted) {
@@ -302,8 +312,10 @@ export default function Dashboard({ onGoJobs }) {
                 <label className="inline">
                   hours old
                   <input
-                    className="input input--num" type="number" min="1"
-                    defaultValue={settings.scrape_params.hours_old ?? 3}
+                    className="input input--num" type="number" min="1" max="168"
+                    key={settings.scrape_params.hours_old ?? 2}
+                    defaultValue={settings.scrape_params.hours_old ?? 2}
+                    onKeyDown={blurOnEnter}
                     onBlur={(e) => {
                       const v = parseInt(e.target.value, 10)
                       if (!Number.isNaN(v) && v !== settings.scrape_params.hours_old) {
@@ -313,31 +325,34 @@ export default function Dashboard({ onGoJobs }) {
                   />
                 </label>
               </div>
-              <div className="toolbar">
-                <label className="inline">
-                  sites
-                  <input
-                    className="input input--num" type="text"
-                    defaultValue={(settings.scrape_params.sites || []).join(', ')}
-                    onBlur={(e) => {
-                      const sites = e.target.value.split(',').map((s) => s.trim()).filter(Boolean)
-                      if (sites.join(', ') !== (settings.scrape_params.sites || []).join(', ')) {
-                        onSaveSettings({ scrape_params: { ...settings.scrape_params, sites } })
-                      }
-                    }}
-                  />
-                </label>
-                <label className="inline">
-                  <input
-                    type="checkbox"
-                    defaultChecked={!!settings.scrape_params.linkedin_fetch_description}
-                    onChange={(e) => onSaveSettings({ scrape_params: { ...settings.scrape_params, linkedin_fetch_description: e.target.checked } })}
-                  />
-                  full descriptions
-                </label>
-              </div>
+              <label className="stack-field">
+                sites
+                <input
+                  className="input" type="text"
+                  key={(settings.scrape_params.sites || []).join(', ')}
+                  defaultValue={(settings.scrape_params.sites || []).join(', ')}
+                  onKeyDown={blurOnEnter}
+                  onBlur={(e) => {
+                    const sites = e.target.value.split(',').map((s) => s.trim()).filter(Boolean)
+                    if (sites.join(', ') !== (settings.scrape_params.sites || []).join(', ')) {
+                      onSaveSettings({ scrape_params: { ...settings.scrape_params, sites } })
+                    }
+                  }}
+                />
+              </label>
+              <label className="inline">
+                <input
+                  type="checkbox"
+                  key={settings.scrape_params.linkedin_fetch_description ? 'desc-on' : 'desc-off'}
+                  defaultChecked={!!settings.scrape_params.linkedin_fetch_description}
+                  onChange={(e) => onSaveSettings({ scrape_params: { ...settings.scrape_params, linkedin_fetch_description: e.target.checked } })}
+                />
+                full descriptions
+              </label>
               <p className="muted small">
-                Changes apply from the next run. Comma-separated locations are scraped one city at a time.
+                Results stay between 1 and 1000. Hours old stay between 1 and 168.
+                Press Enter or click away to save. Changes apply from the next run.
+                Comma-separated locations are scraped one city at a time.
               </p>
             </>
           ) : (

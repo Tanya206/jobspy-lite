@@ -39,7 +39,7 @@ from .agent.tracing import (
     record_output,
     resume_match_span,
 )
-from .config import RESCORE_AFTER_HOURS, clamp_int
+from .config import RESCORE_AFTER_HOURS, clamp_int, normalize_scrape_counts
 from .scraper import JobScraper, ScrapeResult
 from .util import job_key, make_json_safe
 
@@ -112,15 +112,9 @@ class PipelineContext:
         # defaults (the dashboard edits them via POST /settings).
         stored_scrape = self.settings.get("scrape_params") or {}
         stored_agent = self.settings.get("agent_params") or {}
-        merged_scrape: Dict[str, Any] = {**self.config, **stored_scrape}
-        if "results_wanted" in merged_scrape:
-            merged_scrape["results_wanted"] = clamp_int(
-                merged_scrape.get("results_wanted"), 1, 200, 15
-            )
-        if "hours_old" in merged_scrape:
-            merged_scrape["hours_old"] = clamp_int(
-                merged_scrape.get("hours_old"), 1, 168, 24
-            )
+        merged_scrape: Dict[str, Any] = normalize_scrape_counts(
+            {**self.config, **stored_scrape}
+        )
         self.scrape_params = merged_scrape
         self.config = {**self.config, **stored_agent}
         self.experience_min: int = self.settings.get(

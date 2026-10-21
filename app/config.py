@@ -91,12 +91,36 @@ _FALLBACKS: Dict[str, Any] = {
 }
 
 
+# Shared by the dashboard and every run. A lower ceiling made config.yaml's
+# 600 (and any dashboard edit above 200) snap back, so scrapes stayed small.
+RESULTS_WANTED_MAX = 1000
+HOURS_OLD_MAX = 168
+
+
 def clamp_int(value: Any, low: int, high: int, default: int) -> int:
     """Clamp ``value`` into ``[low, high]``; ``default`` when it is not an int."""
     try:
         return min(high, max(low, int(value)))
     except (TypeError, ValueError):
         return default
+
+
+def clamp_results_wanted(value: Any) -> int:
+    return clamp_int(value, 1, RESULTS_WANTED_MAX, 15)
+
+
+def clamp_hours_old(value: Any) -> int:
+    return clamp_int(value, 1, HOURS_OLD_MAX, 24)
+
+
+def normalize_scrape_counts(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Clamp results and hours when those keys are present. Other keys stay."""
+    out = dict(params)
+    if "results_wanted" in out:
+        out["results_wanted"] = clamp_results_wanted(out.get("results_wanted"))
+    if "hours_old" in out:
+        out["hours_old"] = clamp_hours_old(out.get("hours_old"))
+    return out
 
 
 def normalize_provider(value: str) -> str:
