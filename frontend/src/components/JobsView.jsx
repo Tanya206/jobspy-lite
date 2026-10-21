@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { getJobs, setJobStatus } from '../api.js'
 import { isSameIstDay } from '../datetime.js'
 import JobCard from './JobCard.jsx'
-import { ErrorBanner, Spinner } from './ui.jsx'
+import { ErrorBanner, PageHead, Spinner } from './ui.jsx'
 
 const FILTERS = [
   { key: 'all', label: 'All' },
@@ -117,8 +117,8 @@ export default function JobsView() {
   )
 
   return (
-    <section>
-      <p className="eyebrow" style={{ marginBottom: 12 }}>Job board</p>
+    <section className="page">
+      <PageHead title="Jobs" lede="Postings from the latest scrapes. Accept or reject from the card." />
       <div className="toolbar">
         <div className="chips-row">
           {FILTERS.map((f) => (
@@ -134,7 +134,7 @@ export default function JobsView() {
         <input
           className="input"
           type="search"
-          placeholder="Search title, company, location…"
+          placeholder="Search jobs"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -165,7 +165,7 @@ export default function JobsView() {
           ) : (
             <>
               <h3>No jobs in view</h3>
-              <p>Run the pipeline from the Dashboard (or wait for the cron scheduler) to fill the board.</p>
+              <p>Run the pipeline from Settings, or wait for the scheduler.</p>
             </>
           )}
         </div>
@@ -187,7 +187,7 @@ export default function JobsView() {
               {rejectedTotal > rejectedJobs.length ? (
                 <p className="muted small">
                   Showing the first {rejectedJobs.length} of {rejectedTotal} — refine with search or clear old
-                  ones via the retention setting on the Overview.
+                  ones via the retention setting in Settings.
                 </p>
               ) : null}
               {rejectedVisible.length ? (

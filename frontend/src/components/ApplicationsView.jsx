@@ -7,6 +7,7 @@ import {
   updateApplication,
 } from '../api.js'
 import RewritePanel from './RewritePanel.jsx'
+import { PageHead } from './ui.jsx'
 import {
   JOB_STATUSES,
   applicationStats,
@@ -123,8 +124,8 @@ export default function ApplicationsView() {
   }
 
   return (
-    <section>
-      <p className="eyebrow">Applications</p>
+    <section className="page">
+      <PageHead title="Applications" lede="Roles you are actually pursuing, separate from the scraped board." />
       <div className="stat-grid">
         <Stat label="Total" value={stats.total} tone="accent" />
         <Stat label="Interviews" value={stats.interviews} tone="info" />

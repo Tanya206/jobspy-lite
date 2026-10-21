@@ -3,31 +3,38 @@ import { getRuns } from '../api.js'
 import { formatIst, secondsBetween } from '../datetime.js'
 import { ErrorBanner, Spinner } from './ui.jsx'
 
-export default function RunsView() {
-  const [runs, setRuns] = useState([])
-  const [loading, setLoading] = useState(false)
+export default function RunsView({ embedded = false, runs: externalRuns }) {
+  const controlled = externalRuns !== undefined
+  const [runs, setRuns] = useState(externalRuns || [])
+  const [loading, setLoading] = useState(!controlled)
   const [error, setError] = useState(null)
 
   useEffect(() => {
+    if (controlled) {
+      setRuns(externalRuns)
+      setLoading(false)
+      return
+    }
     setLoading(true)
     getRuns(100)
       .then((data) => setRuns(data.runs || []))
       .catch(setError)
       .finally(() => setLoading(false))
-  }, [])
+  }, [controlled, externalRuns])
 
   return (
     <section>
-      <p className="eyebrow" style={{ marginBottom: 12 }}>Pipeline runs</p>
+      {embedded ? null : <p className="eyebrow" style={{ marginBottom: 12 }}>Pipeline runs</p>}
       <ErrorBanner error={error} />
       {loading ? <Spinner label="Loading runs…" /> : null}
       {!loading && !runs.length ? (
         <div className="empty">
           <h3>No runs yet</h3>
-          <p>Trigger one from the Dashboard, or let the cron scheduler fire.</p>
+          <p>Start one from Settings, or wait for the scheduler.</p>
         </div>
       ) : null}
       {runs.length ? (
+        <div className="runs-scroll">
         <table className="runs-table">
           <thead>
             <tr>
@@ -68,6 +75,7 @@ export default function RunsView() {
             ))}
           </tbody>
         </table>
+        </div>
       ) : null}
     </section>
   )

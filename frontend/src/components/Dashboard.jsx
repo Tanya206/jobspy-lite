@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   exportUrl, getResumeInfo, getRunLatest, getScheduler, getSettings,
-  getStats, purgeOlderThan, saveSchedulerConfig, saveSettings, startRun, testNotify,
+  purgeOlderThan, saveSchedulerConfig, saveSettings, startRun, testNotify,
   toggleScheduler, uploadResume,
 } from '../api.js'
 import { formatIst } from '../datetime.js'
-import { ErrorBanner, ProgressBar, Spinner } from './ui.jsx'
+import { ErrorBanner, PageHead, ProgressBar, Spinner } from './ui.jsx'
 
 const AI_PROVIDERS = {
   nvidia: {
@@ -33,17 +33,7 @@ function providerOf(params) {
   return 'custom'
 }
 
-function StatCard({ label, value, tone }) {
-  return (
-    <div className={`stat-card${tone ? ` stat-card--${tone}` : ''}`}>
-      <div className="stat-card__value">{value ?? '—'}</div>
-      <div className="stat-card__label">{label}</div>
-    </div>
-  )
-}
-
 export default function Dashboard({ onGoJobs }) {
-  const [stats, setStats] = useState(null)
   const [resume, setResume] = useState(null)
   const [sched, setSched] = useState(null)
   const [settings, setSettings] = useState(null)
@@ -60,10 +50,9 @@ export default function Dashboard({ onGoJobs }) {
 
   async function refreshAll() {
     try {
-      const [s, r, sc, st, rl] = await Promise.all([
-        getStats(), getResumeInfo(), getScheduler(), getSettings(), getRunLatest(),
+      const [r, sc, st, rl] = await Promise.all([
+        getResumeInfo(), getScheduler(), getSettings(), getRunLatest(),
       ])
-      setStats(s)
       setResume(r)
       setSched(sc)
       setSettings(st)
@@ -80,7 +69,6 @@ export default function Dashboard({ onGoJobs }) {
     const timer = setInterval(() => {
       getRunLatest().then(setRun).catch(() => {})
       getScheduler().then(setSched).catch(() => {})
-      getStats().then(setStats).catch(() => {})
     }, 5000)
     return () => clearInterval(timer)
   }, [])
@@ -191,22 +179,26 @@ export default function Dashboard({ onGoJobs }) {
   const schedOn = sched?.running
 
   return (
-    <section>
-      <p className="eyebrow" style={{ marginBottom: 12 }}>Overview</p>
+    <section className="page">
+      <PageHead
+        title="Settings"
+        lede="Resume, schedule, scrape, and model. Values saved here apply on the next run."
+      />
       <ErrorBanner error={error} />
 
-      <div className="stat-grid">
-        <StatCard label="total jobs" value={stats?.total} tone="accent" />
-        <StatCard label="new" value={stats?.new} tone="info" />
-        <StatCard label="accepted" value={stats?.accepted} tone="ok" />
-        <StatCard label="rejected (manual)" value={stats?.manual_rejected} tone="no" />
-        <StatCard label="auto-rejected" value={stats?.auto_rejected} tone="warn" />
-        <StatCard label="avg score" value={stats?.avg_score} tone="accent" />
-      </div>
-
+      <div className="settings-layout">
+        <nav className="settings-nav" aria-label="Settings sections">
+          <a href="#resume">Resume</a>
+          <a href="#scheduler">Scheduler</a>
+          <a href="#scrape">Scrape</a>
+          <a href="#model">Model</a>
+          <a href="#screening">Screening</a>
+          <a href="#pipeline">Pipeline</a>
+        </nav>
+        <div className="settings-main">
       <div className="panel-grid">
-        <div className="panel">
-          <h3 className="panel__title">Résumé</h3>
+        <div className="panel" id="resume">
+          <h3 className="panel__title">Resume</h3>
           {resume?.name ? (
             <p className="small">
               <b>{resume.name}</b>
@@ -228,8 +220,8 @@ export default function Dashboard({ onGoJobs }) {
           </button>
         </div>
 
-        <div className="panel">
-          <h3 className="panel__title">Cron scheduler</h3>
+        <div className="panel" id="scheduler">
+          <h3 className="panel__title">Scheduler</h3>
           <div className="sched-status">
             <span className={`status-dot ${schedOn ? 'status-dot--on' : 'status-dot--off'}`} />
             <span>{schedOn ? 'running' : 'stopped'}</span>
@@ -257,8 +249,8 @@ export default function Dashboard({ onGoJobs }) {
           ) : null}
         </div>
 
-        <div className="panel">
-          <h3 className="panel__title">Scrape params</h3>
+        <div className="panel" id="scrape">
+          <h3 className="panel__title">Scrape</h3>
           {settings?.scrape_params ? (
             <>
               <label className="stack-field">
@@ -293,11 +285,11 @@ export default function Dashboard({ onGoJobs }) {
                   }}
                 />
               </label>
-              <div className="toolbar">
-                <label className="inline">
+              <div className="settings-fields">
+                <label className="stack-field">
                   results
                   <input
-                    className="input input--num" type="number" min="1" max="1000"
+                    className="input" type="number" min="1" max="1000"
                     key={settings.scrape_params.results_wanted ?? 600}
                     defaultValue={settings.scrape_params.results_wanted ?? 600}
                     onKeyDown={blurOnEnter}
@@ -309,10 +301,10 @@ export default function Dashboard({ onGoJobs }) {
                     }}
                   />
                 </label>
-                <label className="inline">
+                <label className="stack-field">
                   hours old
                   <input
-                    className="input input--num" type="number" min="1" max="168"
+                    className="input" type="number" min="1" max="168"
                     key={settings.scrape_params.hours_old ?? 2}
                     defaultValue={settings.scrape_params.hours_old ?? 2}
                     onKeyDown={blurOnEnter}
@@ -360,70 +352,70 @@ export default function Dashboard({ onGoJobs }) {
           )}
         </div>
 
-        <div className="panel">
-          <h3 className="panel__title">AI agent</h3>
+        <div className="panel" id="model">
+          <h3 className="panel__title">Model</h3>
           {settings?.agent_params ? (
             <>
-              <label className="inline">
-                provider
-                <select
-                  className="select"
-                  value={providerOf(settings.agent_params)}
-                  onChange={(e) => {
-                    const id = e.target.value
-                    const preset = AI_PROVIDERS[id]
-                    if (!preset) return
-                    onSaveSettings({
-                      agent_params: {
-                        ...settings.agent_params,
-                        ai_provider: id,
-                        ai_model: preset.model,
-                        ai_base_url: preset.baseUrl,
-                      },
-                    })
-                  }}
-                >
-                  <option value="nvidia">NVIDIA NIM</option>
-                  <option value="openai">OpenAI</option>
-                  {providerOf(settings.agent_params) === 'custom' ? (
-                    <option value="custom">Custom</option>
-                  ) : null}
-                </select>
-              </label>
-              <label className="inline">
-                model
-                <input
-                  className="input" type="text"
-                  key={settings.agent_params.ai_model}
-                  defaultValue={settings.agent_params.ai_model ?? ''}
-                  onBlur={(e) => {
-                    const v = e.target.value.trim()
-                    if (v && v !== settings.agent_params.ai_model) {
-                      onSaveSettings({ agent_params: { ...settings.agent_params, ai_model: v } })
-                    }
-                  }}
-                />
-              </label>
-              <label className="inline">
-                base URL
-                <input
-                  className="input" type="text"
-                  key={settings.agent_params.ai_base_url}
-                  placeholder={settings.agent_params.ai_base_url || 'https://integrate.api.nvidia.com/v1'}
-                  defaultValue={settings.agent_params.ai_base_url ?? ''}
-                  onBlur={(e) => {
-                    const v = e.target.value.trim()
-                    if (v !== (settings.agent_params.ai_base_url ?? '')) {
-                      onSaveSettings({ agent_params: { ...settings.agent_params, ai_base_url: v } })
-                    }
-                  }}
-                />
-              </label>
-              <div className="toolbar">
-                <label className="inline">
+              <div className="settings-fields">
+                <label className="stack-field">
+                  provider
+                  <select
+                    className="select"
+                    value={providerOf(settings.agent_params)}
+                    onChange={(e) => {
+                      const id = e.target.value
+                      const preset = AI_PROVIDERS[id]
+                      if (!preset) return
+                      onSaveSettings({
+                        agent_params: {
+                          ...settings.agent_params,
+                          ai_provider: id,
+                          ai_model: preset.model,
+                          ai_base_url: preset.baseUrl,
+                        },
+                      })
+                    }}
+                  >
+                    <option value="nvidia">NVIDIA NIM</option>
+                    <option value="openai">OpenAI</option>
+                    {providerOf(settings.agent_params) === 'custom' ? (
+                      <option value="custom">Custom</option>
+                    ) : null}
+                  </select>
+                </label>
+                <label className="stack-field">
+                  model
+                  <input
+                    className="input" type="text"
+                    key={settings.agent_params.ai_model}
+                    defaultValue={settings.agent_params.ai_model ?? ''}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim()
+                      if (v && v !== settings.agent_params.ai_model) {
+                        onSaveSettings({ agent_params: { ...settings.agent_params, ai_model: v } })
+                      }
+                    }}
+                  />
+                </label>
+                <label className="stack-field span-2">
+                  base URL
+                  <input
+                    className="input" type="text"
+                    key={settings.agent_params.ai_base_url}
+                    placeholder={settings.agent_params.ai_base_url || 'https://integrate.api.nvidia.com/v1'}
+                    defaultValue={settings.agent_params.ai_base_url ?? ''}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim()
+                      if (v !== (settings.agent_params.ai_base_url ?? '')) {
+                        onSaveSettings({ agent_params: { ...settings.agent_params, ai_base_url: v } })
+                      }
+                    }}
+                  />
+                </label>
+                <label className="stack-field">
                   rate limit / min
                   <input
-                    className="input input--num" type="number" min="0"
+                    className="input" type="number" min="0"
                     defaultValue={settings.agent_params.ai_rate_limit_per_min ?? 30}
                     onBlur={(e) => {
                       const v = parseInt(e.target.value, 10)
@@ -433,10 +425,10 @@ export default function Dashboard({ onGoJobs }) {
                     }}
                   />
                 </label>
-                <label className="inline">
+                <label className="stack-field">
                   workers
                   <input
-                    className="input input--num" type="number" min="1" max="16"
+                    className="input" type="number" min="1" max="16"
                     defaultValue={settings.max_workers ?? 4}
                     onBlur={(e) => {
                       const v = parseInt(e.target.value, 10)
@@ -446,48 +438,48 @@ export default function Dashboard({ onGoJobs }) {
                     }}
                   />
                 </label>
+                <label className="stack-field">
+                  rewrite model
+                  <input
+                    className="input" type="text"
+                    placeholder={settings.rewrite_model_default || 'same as scoring model'}
+                    defaultValue={settings.agent_params.rewrite_model ?? ''}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim()
+                      if (v !== (settings.agent_params.rewrite_model ?? '')) {
+                        onSaveSettings({ agent_params: { ...settings.agent_params, rewrite_model: v } })
+                      }
+                    }}
+                  />
+                </label>
+                <label className="stack-field">
+                  rewrite tries
+                  <input
+                    className="input" type="number" min="1" max="5"
+                    defaultValue={settings.agent_params.rewrite_max_tries ?? 3}
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value, 10)
+                      if (!Number.isNaN(v) && v !== settings.agent_params.rewrite_max_tries) {
+                        onSaveSettings({ agent_params: { ...settings.agent_params, rewrite_max_tries: v } })
+                      }
+                    }}
+                  />
+                </label>
+                <label className="stack-field span-2">
+                  rewrite base URL
+                  <input
+                    className="input" type="text"
+                    placeholder="same as scoring base URL"
+                    defaultValue={settings.agent_params.rewrite_base_url ?? ''}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim()
+                      if (v !== (settings.agent_params.rewrite_base_url ?? '')) {
+                        onSaveSettings({ agent_params: { ...settings.agent_params, rewrite_base_url: v } })
+                      }
+                    }}
+                  />
+                </label>
               </div>
-              <label className="inline">
-                rewrite model
-                <input
-                  className="input" type="text"
-                  placeholder={settings.rewrite_model_default || 'same as scoring model'}
-                  defaultValue={settings.agent_params.rewrite_model ?? ''}
-                  onBlur={(e) => {
-                    const v = e.target.value.trim()
-                    if (v !== (settings.agent_params.rewrite_model ?? '')) {
-                      onSaveSettings({ agent_params: { ...settings.agent_params, rewrite_model: v } })
-                    }
-                  }}
-                />
-              </label>
-              <label className="inline">
-                rewrite base URL
-                <input
-                  className="input" type="text"
-                  placeholder="same as scoring base URL"
-                  defaultValue={settings.agent_params.rewrite_base_url ?? ''}
-                  onBlur={(e) => {
-                    const v = e.target.value.trim()
-                    if (v !== (settings.agent_params.rewrite_base_url ?? '')) {
-                      onSaveSettings({ agent_params: { ...settings.agent_params, rewrite_base_url: v } })
-                    }
-                  }}
-                />
-              </label>
-              <label className="inline">
-                rewrite tries
-                <input
-                  className="input input--num" type="number" min="1" max="5"
-                  defaultValue={settings.agent_params.rewrite_max_tries ?? 3}
-                  onBlur={(e) => {
-                    const v = parseInt(e.target.value, 10)
-                    if (!Number.isNaN(v) && v !== settings.agent_params.rewrite_max_tries) {
-                      onSaveSettings({ agent_params: { ...settings.agent_params, rewrite_max_tries: v } })
-                    }
-                  }}
-                />
-              </label>
               <label className="stack-field">
                 additional info
                 <textarea
@@ -510,7 +502,7 @@ export default function Dashboard({ onGoJobs }) {
           )}
         </div>
 
-        <div className="panel">
+        <div className="panel" id="screening">
           <h3 className="panel__title">Screening</h3>
           {settings ? (
             <>
@@ -590,8 +582,8 @@ export default function Dashboard({ onGoJobs }) {
         </div>
       </div>
 
-      <div className="panel">
-        <h3 className="panel__title">Pipeline run</h3>
+      <div className="panel" id="pipeline">
+        <h3 className="panel__title">Pipeline</h3>
         <div className="toolbar">
           <button className="btn btn--primary" disabled={busy || running} onClick={() => onRunNow(false)}>
             {running ? <Spinner label="Running…" /> : 'Run now'}
@@ -624,6 +616,8 @@ export default function Dashboard({ onGoJobs }) {
           </p>
         ) : null}
         {notifyMsg ? <p className="small" style={{ marginTop: 6 }}>{notifyMsg}</p> : null}
+      </div>
+        </div>
       </div>
     </section>
   )

@@ -19,6 +19,15 @@ export function ProgressBar({ pct }) {
   )
 }
 
+export function PageHead({ title, lede }) {
+  return (
+    <header className="page-head">
+      <h1>{title}</h1>
+      {lede ? <p>{lede}</p> : null}
+    </header>
+  )
+}
+
 export function ErrorBanner({ error }) {
   if (!error) return null
   return (

@@ -1,19 +1,18 @@
 import { useEffect, useState } from 'react'
 import { getHealth, getToken, setToken, setUnauthorizedHandler } from './api.js'
+import AnalyticsView from './components/AnalyticsView.jsx'
 import ApplicationsView from './components/ApplicationsView.jsx'
 import Dashboard from './components/Dashboard.jsx'
 import JobsView from './components/JobsView.jsx'
-import RunsView from './components/RunsView.jsx'
 
-const TABS = [
-  { key: 'dashboard', label: 'Dashboard' },
-  { key: 'jobs', label: 'Jobs' },
-  { key: 'runs', label: 'Runs' },
-  { key: 'applications', label: 'Applications' },
+const NAV = [
+  { key: 'jobs', label: 'Jobs', icon: IconJobs },
+  { key: 'analytics', label: 'Analytics', icon: IconChart },
+  { key: 'applications', label: 'Applications', icon: IconList },
 ]
 
 export default function App() {
-  const [tab, setTab] = useState('dashboard')
+  const [tab, setTab] = useState('jobs')
   const [health, setHealth] = useState(null)
   const [needsToken, setNeedsToken] = useState(false)
   const [tokenDraft, setTokenDraft] = useState(() => getToken())
@@ -36,6 +35,10 @@ export default function App() {
       clearInterval(timer)
     }
   }, [])
+
+  useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [tab])
 
   const jobsNav = () => setTab('jobs')
 
@@ -61,24 +64,32 @@ export default function App() {
         </div>
 
         <nav className="sidebar__nav" aria-label="Pages">
-          {TABS.map((t) => (
+          {NAV.map((item) => (
             <button
-              key={t.key}
-              className={`nav-item ${tab === t.key ? 'nav-item--active' : ''}`}
-              onClick={() => setTab(t.key)}
+              key={item.key}
+              className={`nav-item ${tab === item.key ? 'nav-item--active' : ''}`}
+              onClick={() => setTab(item.key)}
             >
-              {t.label}
+              <item.icon />
+              {item.label}
             </button>
           ))}
         </nav>
 
         <div className="sidebar__foot">
+          <button
+            className={`nav-item ${tab === 'settings' ? 'nav-item--active' : ''}`}
+            onClick={() => setTab('settings')}
+          >
+            <IconSettings />
+            Settings
+          </button>
           <span
             className={`health-pill ${health?.status === 'ok' ? 'health-pill--ok' : 'health-pill--bad'}`}
             title={health ? JSON.stringify(health, null, 1) : 'checking…'}
           >
             <span className="health-dot" />
-            {health?.status === 'ok' ? 'Backend ok' : 'Backend unreachable'}
+            {health?.status === 'ok' ? 'Connected' : 'Offline'}
           </span>
         </div>
       </aside>
@@ -110,13 +121,49 @@ export default function App() {
         ) : null}
 
         <main className="main">
-          {tab === 'dashboard' ? <Dashboard onGoJobs={jobsNav} /> : null}
           {tab === 'jobs' ? <JobsView /> : null}
-          {tab === 'runs' ? <RunsView /> : null}
+          {tab === 'analytics' ? <AnalyticsView /> : null}
           {tab === 'applications' ? <ApplicationsView /> : null}
+          {tab === 'settings' ? <Dashboard onGoJobs={jobsNav} /> : null}
         </main>
       </div>
     </div>
+  )
+}
+
+function IconJobs() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+      <rect x="3" y="7" width="18" height="13" rx="2" />
+      <path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function IconChart() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+      <path d="M4 19V5M4 19h16" strokeLinecap="round" />
+      <path d="M8 15l4-5 3 3 5-7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function IconList() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+      <path d="M8 7h12M8 12h12M8 17h12" strokeLinecap="round" />
+      <path d="M4 7h.01M4 12h.01M4 17h.01" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function IconSettings() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6" strokeLinecap="round" />
+    </svg>
   )
 }
 
