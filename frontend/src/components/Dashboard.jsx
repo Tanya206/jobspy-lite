@@ -383,7 +383,7 @@ export default function Dashboard({ onGoJobs }) {
                     ) : null}
                   </select>
                 </label>
-                <label className="stack-field">
+                <label className="stack-field span-2">
                   model
                   <input
                     className="input" type="text"
