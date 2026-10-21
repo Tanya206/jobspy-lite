@@ -506,69 +506,73 @@ export default function Dashboard({ onGoJobs }) {
           <h3 className="panel__title">Screening</h3>
           {settings ? (
             <>
-              <label className="inline">
-                score threshold
-                <input
-                  className="input input--num"
-                  type="number" min="0" max="100"
-                  defaultValue={settings.score_threshold}
-                  onBlur={(e) => {
-                    const v = parseInt(e.target.value, 10)
-                    if (!Number.isNaN(v) && v !== settings.score_threshold) onSaveSettings({ score_threshold: v })
-                  }}
-                />
-              </label>
-              <label className="inline">
-                exp. min yrs
-                <input
-                  className="input input--num"
-                  type="number" min="0"
-                  defaultValue={settings.experience_min_years ?? 0}
-                  onBlur={(e) => {
-                    const v = parseInt(e.target.value, 10)
-                    if (!Number.isNaN(v) && v !== settings.experience_min_years) onSaveSettings({ experience_min_years: v })
-                  }}
-                />
-              </label>
-              <label className="inline">
-                exp. max yrs
-                <input
-                  className="input input--num"
-                  type="number" min="0"
-                  defaultValue={settings.experience_max_years ?? ''}
-                  onBlur={(e) => {
-                    const raw = e.target.value.trim()
-                    const v = raw === '' ? 0 : parseInt(raw, 10)
-                    if (!Number.isNaN(v) && v !== settings.experience_max_years) onSaveSettings({ experience_max_years: v })
-                  }}
-                />
-              </label>
-              <label className="inline">
-                auto-delete after (days)
-                <input
-                  className="input input--num"
-                  type="number" min="0"
-                  defaultValue={settings.retention_days ?? 0}
-                  title="Delete postings not seen in this many days at the end of each run. 0 = keep everything."
-                  onBlur={(e) => {
-                    const v = parseInt(e.target.value, 10)
-                    if (!Number.isNaN(v) && v >= 0 && v !== settings.retention_days) onSaveSettings({ retention_days: v })
-                  }}
-                />
-              </label>
-              <label className="inline">
-                delete data older than (days)
-                <input
-                  className="input input--num"
-                  type="number" min="1"
-                  value={purgeDays}
-                  onChange={(e) => setPurgeDays(e.target.value)}
-                  title="Delete jobs first seen more than this many days ago, and run history of the same age. Accepted jobs are kept."
-                />
-              </label>
-              <button className="btn" type="button" onClick={onPurge} disabled={busy}>
-                Delete old data
-              </button>
+              <div className="settings-fields">
+                <label className="stack-field">
+                  score threshold
+                  <input
+                    className="input"
+                    type="number" min="0" max="100"
+                    defaultValue={settings.score_threshold}
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value, 10)
+                      if (!Number.isNaN(v) && v !== settings.score_threshold) onSaveSettings({ score_threshold: v })
+                    }}
+                  />
+                </label>
+                <label className="stack-field">
+                  exp. min yrs
+                  <input
+                    className="input"
+                    type="number" min="0"
+                    defaultValue={settings.experience_min_years ?? 0}
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value, 10)
+                      if (!Number.isNaN(v) && v !== settings.experience_min_years) onSaveSettings({ experience_min_years: v })
+                    }}
+                  />
+                </label>
+                <label className="stack-field">
+                  exp. max yrs
+                  <input
+                    className="input"
+                    type="number" min="0"
+                    defaultValue={settings.experience_max_years ?? ''}
+                    onBlur={(e) => {
+                      const raw = e.target.value.trim()
+                      const v = raw === '' ? 0 : parseInt(raw, 10)
+                      if (!Number.isNaN(v) && v !== settings.experience_max_years) onSaveSettings({ experience_max_years: v })
+                    }}
+                  />
+                </label>
+                <label className="stack-field">
+                  auto-delete after (days)
+                  <input
+                    className="input"
+                    type="number" min="0"
+                    defaultValue={settings.retention_days ?? 0}
+                    title="Delete postings not seen in this many days at the end of each run. 0 = keep everything."
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value, 10)
+                      if (!Number.isNaN(v) && v >= 0 && v !== settings.retention_days) onSaveSettings({ retention_days: v })
+                    }}
+                  />
+                </label>
+                <label className="stack-field span-2">
+                  delete data older than (days)
+                  <span className="field-action">
+                    <input
+                      className="input"
+                      type="number" min="1"
+                      value={purgeDays}
+                      onChange={(e) => setPurgeDays(e.target.value)}
+                      title="Delete jobs first seen more than this many days ago, and run history of the same age. Accepted jobs are kept."
+                    />
+                    <button className="btn" type="button" onClick={onPurge} disabled={busy}>
+                      Delete old data
+                    </button>
+                  </span>
+                </label>
+              </div>
               <p className="muted small">
                 Blank max = open-ended; auto-delete 0 = keep everything. Changes apply from the next run — the
                 pipeline deletes postings not seen for that many days (including auto-rejected ones).
@@ -629,55 +633,57 @@ function SchedForm({ form, setForm, onSave, busy }) {
   }
   return (
     <div className="sched-form">
-      <label className="inline">
-        mode
-        <select
-          className="select"
-          value={form.mode}
-          onChange={(e) => set('mode', e.target.value)}
-        >
-          <option value="interval">interval</option>
-          <option value="cron">cron expression</option>
-        </select>
-      </label>
-      {form.mode === 'interval' ? (
-        <>
-          <label className="inline">
-            every (min)
-            <input
-              className="input input--num" type="number" min="5"
-              value={form.interval_minutes}
-              onChange={(e) => set('interval_minutes', Number(e.target.value))}
-            />
-          </label>
-          <label className="inline">
-            active from (h)
-            <input
-              className="input input--num" type="number" min="0" max="23"
-              value={form.active_from}
-              onChange={(e) => set('active_from', Number(e.target.value))}
-            />
-          </label>
-          <label className="inline">
-            active to (h)
-            <input
-              className="input input--num" type="number" min="1" max="24"
-              value={form.active_to}
-              onChange={(e) => set('active_to', Number(e.target.value))}
-            />
-          </label>
-        </>
-      ) : (
-        <label className="inline">
-          cron (min hour day month weekday)
-          <input
-            className="select" type="text"
-            value={form.cron_expression}
-            onChange={(e) => set('cron_expression', e.target.value)}
-            placeholder="0 */2 * * *"
-          />
+      <div className="settings-fields">
+        <label className="stack-field">
+          mode
+          <select
+            className="select"
+            value={form.mode}
+            onChange={(e) => set('mode', e.target.value)}
+          >
+            <option value="interval">interval</option>
+            <option value="cron">cron expression</option>
+          </select>
         </label>
-      )}
+        {form.mode === 'interval' ? (
+          <>
+            <label className="stack-field">
+              every (min)
+              <input
+                className="input" type="number" min="5"
+                value={form.interval_minutes}
+                onChange={(e) => set('interval_minutes', Number(e.target.value))}
+              />
+            </label>
+            <label className="stack-field">
+              active from (h)
+              <input
+                className="input" type="number" min="0" max="23"
+                value={form.active_from}
+                onChange={(e) => set('active_from', Number(e.target.value))}
+              />
+            </label>
+            <label className="stack-field">
+              active to (h)
+              <input
+                className="input" type="number" min="1" max="24"
+                value={form.active_to}
+                onChange={(e) => set('active_to', Number(e.target.value))}
+              />
+            </label>
+          </>
+        ) : (
+          <label className="stack-field span-2">
+            cron (min hour day month weekday)
+            <input
+              className="input" type="text"
+              value={form.cron_expression}
+              onChange={(e) => set('cron_expression', e.target.value)}
+              placeholder="0 */2 * * *"
+            />
+          </label>
+        )}
+      </div>
       <div className="toolbar">
         <button className="btn btn--primary" disabled={busy} onClick={onSave}>Save schedule</button>
       </div>
