@@ -78,6 +78,35 @@ Optional keys: `OPENAI_API_KEY`, `REWRITE_API_KEY`, `OTEL_EXPORTER_OTLP_HEADERS`
 This value is not stored in Terraform state. Updating it is another
 `put-secret-value`; the next deploy rewrites `~/app/.env` from it.
 
+## GitHub Actions
+
+Two workflows, independent of the OCI jobs:
+
+| Workflow | File | When |
+|---|---|---|
+| Terraform AWS | `.github/workflows/terraform-aws.yml` | plan on PRs/pushes to `infra/aws`; apply is **Run workflow** only |
+| Deploy AWS | `.github/workflows/deploy-aws.yml` | push to `master` (app/frontend/Docker) or **Run workflow** |
+
+Repo secrets:
+
+| Secret | Used by | Value |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` | Terraform AWS | IAM user/key that can manage the stack |
+| `AWS_SECRET_ACCESS_KEY` | Terraform AWS | matching secret |
+| `AWS_REGION` (variable) | Terraform AWS | optional; default `us-east-1` |
+| `TF_VAR_AWS_SSH_PUBLIC_KEY` | Terraform AWS | contents of `~/.ssh/jobspy-aws.pub` |
+| `AWS_HOST` | Deploy AWS | Elastic IP (`terraform output public_ip`) |
+| `AWS_SSH_USER` | Deploy AWS | `ubuntu` |
+| `AWS_SSH_KEY` | Deploy AWS | private key matching that public key |
+
+After the first apply, set `AWS_HOST` from the job log (`public_ip`). Deploy
+rsyncs the repo, rewrites `~/app/.env` from Secrets Manager on the instance,
+then `docker compose up --build -d`. CI never uploads `.env`.
+
+If you already applied this stack on your laptop, do not apply from Actions
+until that state is in the workflow cache (or an S3 backend) — an empty CI
+state would create a second VPC and instance.
+
 ## Deploy the app
 
 From the repo root (Git Bash or WSL on Windows):

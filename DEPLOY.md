@@ -108,6 +108,9 @@ AWS_SSH_KEY=~/.ssh/jobspy-aws bash deploy/deploy-aws.sh
 The deploy script does not upload `.env`. The instance role reads the secret
 and writes `~/app/.env` on the host before `docker compose` starts.
 
+GitHub Actions: **Terraform AWS** (plan on PRs, apply by hand) and **Deploy AWS**
+(push to `master`, or Run workflow). Secrets are listed in `infra/aws/README.md`.
+
 Details, IAM needs, and teardown: `infra/aws/README.md`. On Windows, run the
 deploy script from Git Bash or WSL.
 

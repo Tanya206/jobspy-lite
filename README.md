@@ -94,7 +94,8 @@ next container start because `enabled` is stored in the settings table.
 > container returns zero jobs.
 
 AWS: [`infra/aws/`](infra/aws/README.md) provisions an EC2 host, then
-`bash deploy/deploy-aws.sh` ships this same Compose stack.
+`bash deploy/deploy-aws.sh` (or the **Deploy AWS** GitHub Action) ships this
+same Compose stack.
 
 ## How scoring works
 

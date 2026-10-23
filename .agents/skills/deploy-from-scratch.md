@@ -51,6 +51,13 @@ Scrape, screening, workers, rate limit, rescore window, proxies, and the schedul
 | `TF_VAR_REGION` | Terraform | e.g. `ap-hyderabad-1` |
 | `TF_VAR_SSH_PUBLIC_KEY` | Terraform | public key authorized on the instance |
 | `TF_VAR_IMAGE_OCID` | Terraform | pinned Ubuntu image OCID (region-specific; see step A5) |
+| `AWS_ACCESS_KEY_ID` | Terraform AWS | IAM access key for the AWS stack |
+| `AWS_SECRET_ACCESS_KEY` | Terraform AWS | matching secret key |
+| `AWS_REGION` (Actions variable) | Terraform AWS | e.g. `us-east-1` (optional; workflow default) |
+| `TF_VAR_AWS_SSH_PUBLIC_KEY` | Terraform AWS | contents of `~/.ssh/jobspy-aws.pub` |
+| `AWS_HOST` | Deploy AWS | Elastic IP from `terraform output public_ip` |
+| `AWS_SSH_USER` | Deploy AWS | `ubuntu` |
+| `AWS_SSH_KEY` | Deploy AWS | private key matching `TF_VAR_AWS_SSH_PUBLIC_KEY` |
 
 Notes learned the hard way: exact casing of `TF_VAR_*` doesn't matter in GitHub
 (workflow maps them), but a trailing newline or a mangled PEM breaks things —
@@ -162,10 +169,16 @@ Full write-up: `infra/aws/README.md`.
 4. `terraform init && terraform apply`. Note `terraform output dashboard_url`.
 5. Store the app secrets (they are not read from a local `.env` on deploy):
    `aws secretsmanager put-secret-value --region $(terraform output -raw aws_region) --secret-id $(terraform output -raw secret_name) --secret-string '{"NVIDIA_API_KEY":"...","TELEGRAM_BOT_TOKEN":"...","TELEGRAM_CHAT_ID":"..."}'`
-6. From the repo root:
+6. GitHub secrets for the AWS workflows: `AWS_ACCESS_KEY_ID`,
+   `AWS_SECRET_ACCESS_KEY`, `TF_VAR_AWS_SSH_PUBLIC_KEY`, then after apply
+   `AWS_HOST` (the Elastic IP), `AWS_SSH_USER=ubuntu`, `AWS_SSH_KEY`.
+   Actions → **Terraform AWS** → Run workflow (apply is manual). Then
+   Actions → **Deploy AWS** → Run workflow. App keys stay in Secrets
+   Manager; CI never ships `.env`.
+7. From the repo root the script still works:
    `AWS_SSH_KEY=~/.ssh/jobspy-aws bash deploy/deploy-aws.sh`
    The instance role fetches the secret and writes `~/app/.env` (mode 600).
-7. `curl http://IP:8000/health`, then upload a resume and start the scheduler.
+8. `curl http://IP:8000/health`, then upload a resume and start the scheduler.
 
 Replacing the instance (`terraform apply -replace=aws_instance.app`) deletes
 the root disk, including `~/app/data`. The Elastic IP stays; clear the old

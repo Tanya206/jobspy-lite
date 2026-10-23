@@ -2,13 +2,13 @@
 
 The whole stack — OCI networking, instance, and the app deployment — is now
 reproducible from the repo. AWS is a separate stack in [`infra/aws/`](aws/README.md)
-with its own state. Three layers:
+with its own state and workflows. Three layers:
 
 | Layer | Tool | Entry point |
 |---|---|---|
-| Cloud resources (VCN, subnet, security list, instance) | Terraform | `infra/` |
-| First-boot server setup (Docker, swap, iptables) | cloud-init | `deploy/cloud-init.yaml` (auto-applied by Terraform) |
-| App build + restart on the server | GitHub Actions | `.github/workflows/deploy-app.yml` |
+| Cloud resources (VCN, subnet, security list, instance) | Terraform | `infra/` (OCI) or `infra/aws/` (AWS) |
+| First-boot server setup (Docker, swap, iptables) | cloud-init | `deploy/cloud-init.yaml` / `deploy/cloud-init-aws.yaml` |
+| App build + restart on the server | GitHub Actions | `.github/workflows/deploy-app.yml` (OCI) / `.github/workflows/deploy-aws.yml` (AWS) |
 
 ## One-time setup
 
@@ -35,6 +35,11 @@ Settings → Secrets and variables → Actions → New repository secret:
 `TF_VAR_*` secrets are picked up by Terraform automatically — no tfvars needed
 in CI. For local runs use `infra/terraform.tfvars` instead (copy
 `terraform.tfvars.example`, gitignored).
+
+AWS uses a separate workflow (`.github/workflows/terraform-aws.yml`) and
+secrets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+`TF_VAR_AWS_SSH_PUBLIC_KEY`, then `AWS_HOST` / `AWS_SSH_USER` / `AWS_SSH_KEY`
+for `.github/workflows/deploy-aws.yml`). See [`infra/aws/README.md`](aws/README.md).
 
 ## Day-to-day
 
