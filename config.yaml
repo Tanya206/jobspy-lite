@@ -7,7 +7,7 @@ ai:
   # nvidia → nvidia/nemotron-3-super-120b-a12b @ https://integrate.api.nvidia.com/v1
   #          (rewrite uses the same model)
   # openai → gpt-5-nano for scoring, gpt-5-mini for rewrite @ https://api.openai.com/v1
-  provider: openai
+  provider: nvidia
   model: ""
   base_url: ""
   rate_limit_per_min: 120
@@ -69,7 +69,7 @@ scheduler:
 tracing:
   # Empty disables export. Auth stays in .env as OTEL_EXPORTER_OTLP_HEADERS.
   # Langfuse needs the /api/public/otel path, not the host alone.
-  otel_endpoint: https://us.cloud.langfuse.com/api/public/otel
+  otel_endpoint: ""
   # Send prompts, model outputs, job postings, and resume text as span
   # input/output. Set false to export only timings, status, and token counts.
-  capture_content: true
+  capture_content: false
