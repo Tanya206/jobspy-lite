@@ -86,6 +86,31 @@ python -m app.cli --once
 Scrapes, scores, stores to SQLite, refreshes `data/jobs.xlsx`, and sends any
 pending Telegram alerts — then exits. Point your OS scheduler at this command.
 
+## Option E — AWS (Terraform + EC2)
+
+Provisions a Ubuntu instance, security group, and Elastic IP, then ships the
+Compose stack the same way as the OCI script.
+
+```bash
+cd infra/aws
+cp terraform.tfvars.example terraform.tfvars   # set ssh_public_key
+terraform init && terraform apply
+
+aws secretsmanager put-secret-value \
+  --region "$(terraform output -raw aws_region)" \
+  --secret-id "$(terraform output -raw secret_name)" \
+  --secret-string '{"NVIDIA_API_KEY":"...","TELEGRAM_BOT_TOKEN":"...","TELEGRAM_CHAT_ID":"..."}'
+
+cd ../..
+AWS_SSH_KEY=~/.ssh/jobspy-aws bash deploy/deploy-aws.sh
+```
+
+The deploy script does not upload `.env`. The instance role reads the secret
+and writes `~/app/.env` on the host before `docker compose` starts.
+
+Details, IAM needs, and teardown: `infra/aws/README.md`. On Windows, run the
+deploy script from Git Bash or WSL.
+
 ## First-run checklist
 
 - [ ] `.env` has NVIDIA_API_KEY (+ Telegram token/chat id for alerts)

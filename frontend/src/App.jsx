@@ -11,6 +11,17 @@ const NAV = [
   { key: 'applications', label: 'Applications', icon: IconList },
 ]
 
+function ScopeMark() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" strokeWidth="1.5" opacity="0.5" />
+      <circle cx="12" cy="12" r="5" strokeWidth="1.5" />
+      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 export default function App() {
   const [tab, setTab] = useState('jobs')
   const [health, setHealth] = useState(null)
@@ -48,17 +59,9 @@ export default function App() {
         <div className="sidebar__top">
           <div className="brand">
             <span className="brand__mark" aria-hidden>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                <circle cx="12" cy="12" r="9" strokeWidth="1.5" opacity="0.5" />
-                <circle cx="12" cy="12" r="5" strokeWidth="1.5" />
-                <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
-                <path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4" strokeWidth="1.5" strokeLinecap="round" />
-              </svg>
+              <ScopeMark />
             </span>
-            <div>
-              <h1 className="brand__name">Job<b>Spy</b></h1>
-              <p className="brand__tag">Lite</p>
-            </div>
+            <h1 className="brand__name">Job<b>Spy</b></h1>
           </div>
           <ThemeToggle />
         </div>

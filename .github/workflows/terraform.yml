@@ -1,6 +1,7 @@
 name: Terraform infra
 
-# Plans on every PR touching infra/, applies on push to master (or by hand).
+# Plans on every PR touching the OCI files in infra/, applies by hand.
+# infra/aws is a separate stack and is not applied by this workflow.
 # Requires repo secrets (same OCI API key as the CLI, values from
 # Profile → User settings → API keys):
 #   TF_VAR_tenancy_ocid, TF_VAR_user_ocid, TF_VAR_fingerprint,
@@ -13,12 +14,16 @@ on:
   push:
     branches: [master]
     paths:
-      - "infra/**"
+      - "infra/*.tf"
+      - "infra/*.md"
+      - "infra/*.example"
       - "deploy/cloud-init.yaml"
       - ".github/workflows/terraform.yml"
   pull_request:
     paths:
-      - "infra/**"
+      - "infra/*.tf"
+      - "infra/*.md"
+      - "infra/*.example"
       - "deploy/cloud-init.yaml"
   workflow_dispatch:
 

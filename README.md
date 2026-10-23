@@ -93,6 +93,9 @@ next container start because `enabled` is stored in the settings table.
 > `PROXIES` in `.env` (comma-separated, e.g. residential proxies) if the
 > container returns zero jobs.
 
+AWS: [`infra/aws/`](infra/aws/README.md) provisions an EC2 host, then
+`bash deploy/deploy-aws.sh` ships this same Compose stack.
+
 ## How scoring works
 
 Each run upserts scraped postings into `jobs` (keyed by URL, falling back to a

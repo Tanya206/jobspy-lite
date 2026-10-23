@@ -1,7 +1,8 @@
 # Infrastructure as Code (Terraform + GitHub Actions)
 
 The whole stack — OCI networking, instance, and the app deployment — is now
-reproducible from the repo. Three layers:
+reproducible from the repo. AWS is a separate stack in [`infra/aws/`](aws/README.md)
+with its own state. Three layers:
 
 | Layer | Tool | Entry point |
 |---|---|---|

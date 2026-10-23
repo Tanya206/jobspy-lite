@@ -35,3 +35,14 @@ infra/*.tfstate.*
 infra/plan.txt
 infra/tfplan
 infra/.terraform.tfstate.lock.info
+
+# AWS stack keeps its own state (infra/ patterns above are not recursive)
+infra/aws/.terraform/
+infra/aws/.terraform.lock.hcl
+infra/aws/terraform.tfvars
+infra/aws/*.tfstate
+infra/aws/*.tfstate.*
+infra/aws/plan.txt
+infra/aws/tfplan
+infra/aws/.terraform.tfstate.lock.info
+infra/aws/secret.json

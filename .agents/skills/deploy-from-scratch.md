@@ -10,10 +10,11 @@ description: >
 
 # Deploy JobSpy Lite from scratch
 
-Two supported paths:
+Three supported paths:
 
 - **Path A — OCI + Terraform + GitHub Actions** (full IaC; what production uses)
 - **Path B — Any Ubuntu VM + deploy script** (fastest; works anywhere Docker runs)
+- **Path C — AWS + Terraform + deploy script** (`infra/aws/`, then `deploy/deploy-aws.sh`)
 
 Prerequisites common to both: this repo cloned, `docker` + `git` + `ssh` on your
 machine, an NVIDIA API key, and a Telegram bot token + chat id.
@@ -144,6 +145,32 @@ interval (30–60 min recommended; 5 min stacks runs) → force one run.
 Troubleshooting: `docker compose logs -f --tail 100` on the server;
 `tail -50 ~/app/build.log` for build failures; check cloud/provider firewall
 (security list + OS iptables) before suspecting the app.
+
+---
+
+## Path C — AWS, Terraform + deploy script
+
+State and variables live in `infra/aws/` (separate from the OCI stack in `infra/`).
+Full write-up: `infra/aws/README.md`.
+
+1. `aws sts get-caller-identity` works (CLI profile or env credentials).
+2. `ssh-keygen -t ed25519 -f ~/.ssh/jobspy-aws -C jobspy-lite`
+3. `cd infra/aws && cp terraform.tfvars.example terraform.tfvars` and paste
+   `~/.ssh/jobspy-aws.pub` into `ssh_public_key`. Narrow `ssh_cidrs` /
+   `app_cidrs` to your IP when you can. Set `JOBSPY_API_TOKEN` inside the
+   Secrets Manager JSON if port 8000 is open to the internet.
+4. `terraform init && terraform apply`. Note `terraform output dashboard_url`.
+5. Store the app secrets (they are not read from a local `.env` on deploy):
+   `aws secretsmanager put-secret-value --region $(terraform output -raw aws_region) --secret-id $(terraform output -raw secret_name) --secret-string '{"NVIDIA_API_KEY":"...","TELEGRAM_BOT_TOKEN":"...","TELEGRAM_CHAT_ID":"..."}'`
+6. From the repo root:
+   `AWS_SSH_KEY=~/.ssh/jobspy-aws bash deploy/deploy-aws.sh`
+   The instance role fetches the secret and writes `~/app/.env` (mode 600).
+7. `curl http://IP:8000/health`, then upload a resume and start the scheduler.
+
+Replacing the instance (`terraform apply -replace=aws_instance.app`) deletes
+the root disk, including `~/app/data`. The Elastic IP stays; clear the old
+host key with `ssh-keygen -R <IP>`. Tear down with `terraform destroy` in
+`infra/aws/`.
 
 ---
 
