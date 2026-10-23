@@ -1,10 +1,10 @@
 # Terraform + AWS provider pins.
-# State stays in this directory (gitignored). For shared use, create an S3
-# bucket first, then uncomment the backend below — the bucket cannot be
-# created by this same configuration.
+# Runs only in GitHub Actions (.github/workflows/aws.yml). State lives in the
+# S3 bucket created by infra/aws/bootstrap; the workflow passes bucket, key,
+# and region with -backend-config.
 
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.10.0"
 
   required_providers {
     aws = {
@@ -13,16 +13,11 @@ terraform {
     }
   }
 
-  # backend "s3" {
-  #   bucket = "jobspy-lite-tfstate"
-  #   key    = "aws/terraform.tfstate"
-  #   region = "us-east-1"
-  # }
+  backend "s3" {}
 }
 
 provider "aws" {
-  region  = var.aws_region
-  profile = var.aws_profile
+  region = var.aws_region
 
   default_tags {
     tags = {

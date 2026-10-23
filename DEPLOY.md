@@ -86,33 +86,20 @@ python -m app.cli --once
 Scrapes, scores, stores to SQLite, refreshes `data/jobs.xlsx`, and sends any
 pending Telegram alerts — then exits. Point your OS scheduler at this command.
 
-## Option E — AWS (Terraform + EC2)
+## Option E — AWS (Terraform in GitHub Actions)
 
-Provisions a Ubuntu instance, security group, and Elastic IP, then ships the
-Compose stack the same way as the OCI script.
+AWS is deployed only through the **AWS** workflow (`.github/workflows/aws.yml`).
+Terraform runs in Actions with state in S3, and all configuration lives in
+GitHub secrets and variables:
 
-```bash
-cd infra/aws
-cp terraform.tfvars.example terraform.tfvars   # set ssh_public_key
-terraform init && terraform apply
+1. Add the repository secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+   `TF_VAR_AWS_SSH_PUBLIC_KEY`, `AWS_SSH_KEY`, and `AWS_APP_ENV` (a JSON object
+   of the `.env` keys).
+2. Actions → **AWS** → Run workflow → `apply`.
 
-aws secretsmanager put-secret-value \
-  --region "$(terraform output -raw aws_region)" \
-  --secret-id "$(terraform output -raw secret_name)" \
-  --secret-string '{"NVIDIA_API_KEY":"...","TELEGRAM_BOT_TOKEN":"...","TELEGRAM_CHAT_ID":"..."}'
-
-cd ../..
-AWS_SSH_KEY=~/.ssh/jobspy-aws bash deploy/deploy-aws.sh
-```
-
-The deploy script does not upload `.env`. The instance role reads the secret
-and writes `~/app/.env` on the host before `docker compose` starts.
-
-GitHub Actions: **Terraform AWS** (plan on PRs, apply by hand) and **Deploy AWS**
-(push to `master`, or Run workflow). Secrets are listed in `infra/aws/README.md`.
-
-Details, IAM needs, and teardown: `infra/aws/README.md`. On Windows, run the
-deploy script from Git Bash or WSL.
+After that, every push to `master` applies Terraform and redeploys the app.
+Pull requests that touch `infra/aws` get a plan comment. Details, variables,
+IAM permissions, and teardown: `infra/aws/README.md`.
 
 ## First-run checklist
 

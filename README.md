@@ -93,9 +93,9 @@ next container start because `enabled` is stored in the settings table.
 > `PROXIES` in `.env` (comma-separated, e.g. residential proxies) if the
 > container returns zero jobs.
 
-AWS: [`infra/aws/`](infra/aws/README.md) provisions an EC2 host, then
-`bash deploy/deploy-aws.sh` (or the **Deploy AWS** GitHub Action) ships this
-same Compose stack.
+AWS: the **AWS** GitHub workflow runs Terraform from [`infra/aws/`](infra/aws/README.md)
+to provision an EC2 host, then ships this same Compose stack. Configuration
+lives in GitHub secrets and variables; there is no local AWS deploy path.
 
 ## How scoring works
 

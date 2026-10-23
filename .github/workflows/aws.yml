@@ -1,0 +1,413 @@
+name: AWS
+
+# The only way the AWS stack is created, changed, deployed, or destroyed.
+# Configuration lives in GitHub (Settings -> Secrets and variables -> Actions);
+# see infra/aws/README.md for the full list.
+#
+#   pull_request        -> terraform plan, posted to the PR
+#   push to master      -> bootstrap state bucket -> terraform apply -> deploy app
+#   Run workflow        -> plan | apply (+ deploy) | destroy
+#
+# Terraform state lives in S3 (<name>-tfstate-<account>-<region>), created by
+# the bootstrap job from infra/aws/bootstrap.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "infra/aws/**"
+      - "deploy/cloud-init-aws.yaml"
+      - "deploy/fetch-aws-env.sh"
+      - "deploy/render_aws_secret.py"
+      - ".github/workflows/aws.yml"
+      - ".github/actions/aws-terraform/**"
+      - "app/**"
+      - "frontend/**"
+      - "config.yaml"
+      - "requirements.txt"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "run.py"
+  pull_request:
+    paths:
+      - "infra/aws/**"
+      - "deploy/cloud-init-aws.yaml"
+      - ".github/workflows/aws.yml"
+      - ".github/actions/aws-terraform/**"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to run
+        type: choice
+        options: [apply, plan, destroy]
+        default: apply
+      confirm_destroy:
+        description: Type the stack name (jobspy-lite) to confirm destroy
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: aws-${{ github.event_name == 'pull_request' && github.ref || 'deploy' }}
+  cancel-in-progress: false
+
+env:
+  NAME: jobspy-lite
+  TF_WORKDIR: infra/aws
+  TF_IN_AUTOMATION: "1"
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_VAR_name: jobspy-lite
+  TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_VAR_instance_type: ${{ vars.AWS_INSTANCE_TYPE || 't3.small' }}
+  TF_VAR_ami_arch: ${{ vars.AWS_AMI_ARCH || 'amd64' }}
+  TF_VAR_root_volume_gb: ${{ vars.AWS_ROOT_VOLUME_GB || '30' }}
+  TF_VAR_app_cidrs: ${{ vars.AWS_APP_CIDRS || '["0.0.0.0/0"]' }}
+  TF_VAR_ssh_public_key: ${{ secrets.TF_VAR_AWS_SSH_PUBLIC_KEY }}
+
+jobs:
+  bootstrap:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          TF_VAR_AWS_SSH_PUBLIC_KEY: ${{ secrets.TF_VAR_AWS_SSH_PUBLIC_KEY }}
+          AWS_SSH_KEY: ${{ secrets.AWS_SSH_KEY }}
+        run: |
+          missing=()
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TF_VAR_AWS_SSH_PUBLIC_KEY AWS_SSH_KEY; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing repository secrets: ${missing[*]} (see infra/aws/README.md)"
+            exit 1
+          fi
+
+      - id: tf
+        uses: ./.github/actions/aws-terraform
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          name: ${{ env.NAME }}
+          working-directory: infra/aws/bootstrap
+          state-key: bootstrap/terraform.tfstate
+
+      - name: Apply state bucket
+        working-directory: infra/aws/bootstrap
+        env:
+          BUCKET: ${{ steps.tf.outputs.bucket }}
+          EXISTS: ${{ steps.tf.outputs.bucket-exists }}
+          TF_VAR_bucket_name: ${{ steps.tf.outputs.bucket }}
+        run: |
+          if [ "$EXISTS" = "true" ]; then
+            terraform apply -input=false -auto-approve -lock-timeout=5m
+            exit 0
+          fi
+
+          # First run: the bucket that will hold state does not exist yet.
+          # Apply with local state, then move that state into the new bucket.
+          printf 'terraform {\n  backend "local" {}\n}\n' > backend_override.tf
+          terraform init -input=false
+          terraform apply -input=false -auto-approve
+          rm backend_override.tf
+          terraform init -input=false -migrate-state -force-copy \
+            -backend-config="bucket=${BUCKET}" \
+            -backend-config="key=bootstrap/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+          rm -f terraform.tfstate terraform.tfstate.backup
+
+  plan:
+    needs: bootstrap
+    if: >-
+      !cancelled() &&
+      (needs.bootstrap.result == 'success' || needs.bootstrap.result == 'skipped') &&
+      (github.event_name == 'pull_request' || inputs.action == 'plan')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: tf
+        uses: ./.github/actions/aws-terraform
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          name: ${{ env.NAME }}
+          working-directory: ${{ env.TF_WORKDIR }}
+
+      - name: Plan
+        if: steps.tf.outputs.bucket-exists == 'true'
+        working-directory: ${{ env.TF_WORKDIR }}
+        run: |
+          terraform validate
+          terraform plan -input=false -no-color -lock-timeout=5m | tee plan.txt
+
+      - name: No state bucket yet
+        if: steps.tf.outputs.bucket-exists != 'true'
+        run: |
+          echo "::notice::State bucket ${{ steps.tf.outputs.bucket }} does not exist yet. Run the AWS workflow (apply) once to create it."
+          echo "State bucket does not exist yet; nothing to plan against." > "$TF_WORKDIR/plan.txt"
+
+      - name: Post plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync(process.env.TF_WORKDIR + '/plan.txt', 'utf8');
+            const body = `#### Terraform AWS plan\n\`\`\`\n${plan.slice(-60000)}\n\`\`\``;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  apply:
+    needs: bootstrap
+    if: github.event_name == 'push' || inputs.action == 'apply'
+    runs-on: ubuntu-latest
+    environment: aws
+    outputs:
+      public_ip: ${{ steps.out.outputs.public_ip }}
+      secret_name: ${{ steps.out.outputs.secret_name }}
+      dashboard_url: ${{ steps.out.outputs.dashboard_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore state from the old Actions cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.TF_WORKDIR }}/.terraform
+            ${{ env.TF_WORKDIR }}/terraform.tfstate
+          key: tfstate-aws-legacy-${{ github.run_id }}
+          restore-keys: |
+            tfstate-aws-
+
+      - name: Set aside cached state
+        run: |
+          if [ -f "$TF_WORKDIR/terraform.tfstate" ]; then
+            mv "$TF_WORKDIR/terraform.tfstate" "$RUNNER_TEMP/legacy.tfstate"
+          fi
+          rm -rf "$TF_WORKDIR/.terraform"
+
+      - id: tf
+        uses: ./.github/actions/aws-terraform
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          name: ${{ env.NAME }}
+          working-directory: ${{ env.TF_WORKDIR }}
+
+      - name: Move cached state into S3
+        working-directory: ${{ env.TF_WORKDIR }}
+        env:
+          BUCKET: ${{ steps.tf.outputs.bucket }}
+        run: |
+          legacy="$RUNNER_TEMP/legacy.tfstate"
+          [ -f "$legacy" ] || exit 0
+          if aws s3api head-object --bucket "$BUCKET" --key aws/terraform.tfstate >/dev/null 2>&1; then
+            echo "S3 already has state; ignoring the cached copy."
+            exit 0
+          fi
+          echo "Pushing state from the Actions cache into s3://${BUCKET}/aws/terraform.tfstate"
+          terraform state push "$legacy"
+
+      - name: Apply
+        working-directory: ${{ env.TF_WORKDIR }}
+        run: |
+          terraform validate
+          terraform apply -input=false -auto-approve -lock-timeout=5m
+
+      - id: out
+        name: Outputs
+        working-directory: ${{ env.TF_WORKDIR }}
+        run: |
+          {
+            echo "public_ip=$(terraform output -raw public_ip)"
+            echo "secret_name=$(terraform output -raw secret_name)"
+            echo "dashboard_url=$(terraform output -raw dashboard_url)"
+          } >> "$GITHUB_OUTPUT"
+          terraform output
+
+  deploy:
+    needs: apply
+    runs-on: ubuntu-latest
+    environment: aws
+    env:
+      HOST: ${{ needs.apply.outputs.public_ip }}
+      SECRET_ID: ${{ needs.apply.outputs.secret_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync AWS_APP_ENV into Secrets Manager
+        env:
+          APP_ENV: ${{ secrets.AWS_APP_ENV }}
+        run: |
+          umask 077
+          current="$RUNNER_TEMP/current.txt"
+          desired="$RUNNER_TEMP/desired.json"
+          trap 'rm -f "$current" "$desired"' EXIT
+
+          have=false
+          if aws secretsmanager get-secret-value --secret-id "$SECRET_ID" \
+              --query SecretString --output text > "$current" 2>/dev/null; then
+            have=true
+          fi
+
+          if [ -z "$APP_ENV" ]; then
+            if [ "$have" = true ]; then
+              echo "::warning::AWS_APP_ENV secret is not set; keeping the value already in ${SECRET_ID}."
+              exit 0
+            fi
+            echo "::error::Set the AWS_APP_ENV repository secret to a JSON object of app environment variables (see infra/aws/README.md)."
+            exit 1
+          fi
+
+          printf '%s' "$APP_ENV" > "$desired"
+          status="$(python3 - "$desired" "$current" "$have" <<'PY'
+          import json, sys
+          desired_path, current_path, have = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+          try:
+              desired = json.load(open(desired_path, encoding="utf-8"))
+          except json.JSONDecodeError:
+              print("invalid"); sys.exit()
+          if not isinstance(desired, dict):
+              print("invalid"); sys.exit()
+          if have:
+              try:
+                  if json.load(open(current_path, encoding="utf-8")) == desired:
+                      print("same"); sys.exit()
+              except json.JSONDecodeError:
+                  pass
+          print("changed")
+          PY
+          )"
+          case "$status" in
+            invalid) echo "::error::AWS_APP_ENV must be a JSON object, e.g. {\"NVIDIA_API_KEY\":\"...\"}"; exit 1 ;;
+            same) echo "Secrets Manager already matches AWS_APP_ENV." ;;
+            changed)
+              aws secretsmanager put-secret-value --secret-id "$SECRET_ID" \
+                --secret-string "file://${desired}" >/dev/null
+              echo "Updated ${SECRET_ID} from AWS_APP_ENV (values not shown)." ;;
+          esac
+
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.AWS_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/aws_key
+          chmod 600 ~/.ssh/aws_key
+          if ! ssh-keygen -y -f ~/.ssh/aws_key >/dev/null 2>&1; then
+            echo "::error::AWS_SSH_KEY is not a valid private key. It must be the full OpenSSH/PEM private key, including the BEGIN/END lines."
+            exit 1
+          fi
+          cat >> ~/.ssh/config <<EOF
+          Host app
+            HostName ${HOST}
+            User ubuntu
+            IdentityFile ~/.ssh/aws_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+            ServerAliveInterval 30
+            ConnectTimeout 10
+          EOF
+
+      - name: Wait for SSH and first-boot setup
+        run: |
+          for i in $(seq 1 30); do
+            if ssh -o LogLevel=ERROR app true 2>/dev/null; then break; fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::SSH to ${HOST} did not come up in 5 minutes."
+              exit 1
+            fi
+            sleep 10
+          done
+          rc=0
+          ssh app 'cloud-init status --wait' || rc=$?
+          if [ "$rc" -eq 1 ]; then
+            echo "::error::cloud-init failed on the instance."
+            ssh app 'sudo tail -40 /var/log/cloud-init-output.log' || true
+            exit 1
+          fi
+
+      - name: Upload repo
+        run: |
+          rsync -az --delete \
+            --exclude .git --exclude .github --exclude .venv --exclude node_modules \
+            --exclude frontend/dist --exclude data --exclude .env --exclude build.log \
+            --exclude __pycache__ --exclude .pytest_cache \
+            --exclude infra \
+            ./ app:~/app/
+
+      - name: Write .env from Secrets Manager
+        run: |
+          ssh app "AWS_REGION='${AWS_REGION}' SECRET_ID='${SECRET_ID}' bash ~/app/deploy/fetch-aws-env.sh ~/app/.env"
+
+      - name: Build, restart, and wait for health
+        run: |
+          ssh app 'cd ~/app && nohup docker compose up --build -d > build.log 2>&1 < /dev/null & exit 0'
+          for i in $(seq 1 60); do
+            sleep 15
+            if ssh app 'curl -sf -m 5 http://127.0.0.1:8000/health' >/dev/null 2>&1; then
+              echo "Healthy after ~$((i*15))s"
+              ssh app 'curl -s http://127.0.0.1:8000/health'
+              echo
+              echo "::notice::Dashboard: ${{ needs.apply.outputs.dashboard_url }}"
+              exit 0
+            fi
+            if ! ssh app "pgrep -f 'compose.*up --build' >/dev/null" \
+                && ssh app "grep -qE 'failed to solve|ERROR' ~/app/build.log"; then
+              echo "::error::Docker build failed."
+              ssh app 'tail -40 ~/app/build.log'
+              exit 1
+            fi
+          done
+          echo "::error::Health check failed after 15 minutes."
+          ssh app 'tail -40 ~/app/build.log'
+          exit 1
+
+  destroy:
+    needs: bootstrap
+    if: inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    environment: aws
+    steps:
+      - name: Confirm
+        if: inputs.confirm_destroy != 'jobspy-lite'
+        run: |
+          echo "::error::Type jobspy-lite in confirm_destroy to destroy the stack."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/aws-terraform
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          name: ${{ env.NAME }}
+          working-directory: ${{ env.TF_WORKDIR }}
+
+      - name: Destroy
+        working-directory: ${{ env.TF_WORKDIR }}
+        run: terraform destroy -input=false -auto-approve -lock-timeout=5m

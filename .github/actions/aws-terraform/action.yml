@@ -1,0 +1,73 @@
+name: AWS Terraform setup
+description: >
+  AWS credentials, Terraform, and the S3 state backend for infra/aws.
+  The state bucket is <name>-tfstate-<account>-<region>. When working-directory
+  is set and the bucket exists, runs terraform init against it.
+
+inputs:
+  aws-access-key-id:
+    required: true
+  aws-secret-access-key:
+    required: true
+  aws-region:
+    required: true
+  name:
+    description: Stack name prefix (bucket and resource names).
+    required: true
+  working-directory:
+    description: Terraform directory to init. Empty skips init.
+    required: false
+    default: ""
+  state-key:
+    required: false
+    default: aws/terraform.tfstate
+
+outputs:
+  bucket:
+    value: ${{ steps.bucket.outputs.bucket }}
+  bucket-exists:
+    value: ${{ steps.bucket.outputs.exists }}
+
+runs:
+  using: composite
+  steps:
+    - uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.12.x
+        terraform_wrapper: false
+
+    - id: bucket
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        REGION: ${{ inputs.aws-region }}
+      run: |
+        account="$(aws sts get-caller-identity --query Account --output text)"
+        bucket="${NAME}-tfstate-${account}-${REGION}"
+        echo "bucket=${bucket}" >> "$GITHUB_OUTPUT"
+        if aws s3api head-bucket --bucket "$bucket" 2>/dev/null; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - if: inputs.working-directory != '' && steps.bucket.outputs.exists == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BUCKET: ${{ steps.bucket.outputs.bucket }}
+        KEY: ${{ inputs.state-key }}
+        REGION: ${{ inputs.aws-region }}
+      run: |
+        terraform init -input=false \
+          -backend-config="bucket=${BUCKET}" \
+          -backend-config="key=${KEY}" \
+          -backend-config="region=${REGION}" \
+          -backend-config="encrypt=true" \
+          -backend-config="use_lockfile=true"

@@ -1,17 +1,11 @@
 # --------------------------------------------------------------------------- #
-# Where — standard AWS credential chain (env vars, ~/.aws/credentials, SSO).
-# No access keys live in tfvars.
+# Where. Every value is set by .github/workflows/aws.yml from GitHub
+# secrets and variables (TF_VAR_*). Credentials come from the workflow.
 # --------------------------------------------------------------------------- #
 variable "aws_region" {
   type        = string
   description = "Region to deploy the agent host into."
   default     = "us-east-1"
-}
-
-variable "aws_profile" {
-  type        = string
-  description = "Named AWS CLI profile. Null uses the default credential chain."
-  default     = null
 }
 
 variable "availability_zone" {
@@ -91,7 +85,7 @@ variable "ssh_public_key" {
 
 variable "ssh_cidrs" {
   type        = list(string)
-  description = "CIDRs allowed to SSH. Tighten this to your public IP (/32)."
+  description = "CIDRs allowed to SSH. The deploy job SSHes from GitHub-hosted runners, whose addresses change, so keep this open unless you use self-hosted runners."
   default     = ["0.0.0.0/0"]
 }
 

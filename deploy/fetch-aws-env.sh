@@ -43,7 +43,7 @@ if ! aws secretsmanager get-secret-value \
   --secret-id "$SECRET_ID" \
   --output json >"$tmp"; then
   echo "Could not read secret ${SECRET_ID} in ${AWS_REGION}." >&2
-  echo "Store the JSON value first — see infra/aws/README.md." >&2
+  echo "Set the AWS_APP_ENV GitHub secret and re-run the AWS workflow — see infra/aws/README.md." >&2
   exit 1
 fi
 

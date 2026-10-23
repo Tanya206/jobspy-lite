@@ -14,7 +14,7 @@ Three supported paths:
 
 - **Path A — OCI + Terraform + GitHub Actions** (full IaC; what production uses)
 - **Path B — Any Ubuntu VM + deploy script** (fastest; works anywhere Docker runs)
-- **Path C — AWS + Terraform + deploy script** (`infra/aws/`, then `deploy/deploy-aws.sh`)
+- **Path C — AWS, Terraform in GitHub Actions only** (`.github/workflows/aws.yml`; no local AWS deploy)
 
 Prerequisites common to both: this repo cloned, `docker` + `git` + `ssh` on your
 machine, an NVIDIA API key, and a Telegram bot token + chat id.
@@ -51,13 +51,12 @@ Scrape, screening, workers, rate limit, rescore window, proxies, and the schedul
 | `TF_VAR_REGION` | Terraform | e.g. `ap-hyderabad-1` |
 | `TF_VAR_SSH_PUBLIC_KEY` | Terraform | public key authorized on the instance |
 | `TF_VAR_IMAGE_OCID` | Terraform | pinned Ubuntu image OCID (region-specific; see step A5) |
-| `AWS_ACCESS_KEY_ID` | Terraform AWS | IAM access key for the AWS stack |
-| `AWS_SECRET_ACCESS_KEY` | Terraform AWS | matching secret key |
-| `AWS_REGION` (Actions variable) | Terraform AWS | e.g. `us-east-1` (optional; workflow default) |
-| `TF_VAR_AWS_SSH_PUBLIC_KEY` | Terraform AWS | contents of `~/.ssh/jobspy-aws.pub` |
-| `AWS_HOST` | Deploy AWS | Elastic IP from `terraform output public_ip` |
-| `AWS_SSH_USER` | Deploy AWS | `ubuntu` |
-| `AWS_SSH_KEY` | Deploy AWS | private key matching `TF_VAR_AWS_SSH_PUBLIC_KEY` |
+| `AWS_ACCESS_KEY_ID` | AWS | IAM access key for the AWS stack |
+| `AWS_SECRET_ACCESS_KEY` | AWS | matching secret key |
+| `TF_VAR_AWS_SSH_PUBLIC_KEY` | AWS | OpenSSH public key authorized on the instance |
+| `AWS_SSH_KEY` | AWS | private key matching `TF_VAR_AWS_SSH_PUBLIC_KEY` |
+| `AWS_APP_ENV` | AWS | JSON object of the app `.env` keys; synced to Secrets Manager |
+| `AWS_REGION`, `AWS_INSTANCE_TYPE`, `AWS_AMI_ARCH`, `AWS_ROOT_VOLUME_GB`, `AWS_APP_CIDRS` (Actions variables) | AWS | optional; defaults in `infra/aws/README.md` |
 
 Notes learned the hard way: exact casing of `TF_VAR_*` doesn't matter in GitHub
 (workflow maps them), but a trailing newline or a mangled PEM breaks things —
@@ -155,35 +154,28 @@ Troubleshooting: `docker compose logs -f --tail 100` on the server;
 
 ---
 
-## Path C — AWS, Terraform + deploy script
+## Path C — AWS, Terraform in GitHub Actions only
 
-State and variables live in `infra/aws/` (separate from the OCI stack in `infra/`).
-Full write-up: `infra/aws/README.md`.
+Never run `terraform` or a deploy script for AWS locally. All config lives in
+GitHub; state lives in S3. Full write-up: `infra/aws/README.md`. For a
+first-time deployer, follow `.agents/skills/first-deploy-aws.md` instead
+(Telegram setup, IAM policy, every secret, verification).
 
-1. `aws sts get-caller-identity` works (CLI profile or env credentials).
-2. `ssh-keygen -t ed25519 -f ~/.ssh/jobspy-aws -C jobspy-lite`
-3. `cd infra/aws && cp terraform.tfvars.example terraform.tfvars` and paste
-   `~/.ssh/jobspy-aws.pub` into `ssh_public_key`. Narrow `ssh_cidrs` /
-   `app_cidrs` to your IP when you can. Set `JOBSPY_API_TOKEN` inside the
-   Secrets Manager JSON if port 8000 is open to the internet.
-4. `terraform init && terraform apply`. Note `terraform output dashboard_url`.
-5. Store the app secrets (they are not read from a local `.env` on deploy):
-   `aws secretsmanager put-secret-value --region $(terraform output -raw aws_region) --secret-id $(terraform output -raw secret_name) --secret-string '{"NVIDIA_API_KEY":"...","TELEGRAM_BOT_TOKEN":"...","TELEGRAM_CHAT_ID":"..."}'`
-6. GitHub secrets for the AWS workflows: `AWS_ACCESS_KEY_ID`,
-   `AWS_SECRET_ACCESS_KEY`, `TF_VAR_AWS_SSH_PUBLIC_KEY`, then after apply
-   `AWS_HOST` (the Elastic IP), `AWS_SSH_USER=ubuntu`, `AWS_SSH_KEY`.
-   Actions → **Terraform AWS** → Run workflow (apply is manual). Then
-   Actions → **Deploy AWS** → Run workflow. App keys stay in Secrets
-   Manager; CI never ships `.env`.
-7. From the repo root the script still works:
-   `AWS_SSH_KEY=~/.ssh/jobspy-aws bash deploy/deploy-aws.sh`
-   The instance role fetches the secret and writes `~/app/.env` (mode 600).
-8. `curl http://IP:8000/health`, then upload a resume and start the scheduler.
+1. Create an IAM user and access key with the permissions listed in
+   `infra/aws/README.md`.
+2. Generate an SSH pair (`ssh-keygen -t ed25519 -N "" -f jobspy-aws`), store
+   both halves as `TF_VAR_AWS_SSH_PUBLIC_KEY` / `AWS_SSH_KEY`, delete the files.
+3. Add `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_APP_ENV` (JSON of
+   the `.env` keys; include `JOBSPY_API_TOKEN` when port 8000 is public).
+   Optional Actions variables: `AWS_REGION`, `AWS_INSTANCE_TYPE`, etc.
+4. Actions → **AWS** → Run workflow → `apply`. Jobs: `bootstrap` (S3 state
+   bucket) → `apply` (Terraform) → `deploy` (sync secret, rsync, compose build,
+   health check). The deploy job prints the dashboard URL.
+5. Open the dashboard, upload a resume, and start the scheduler.
 
-Replacing the instance (`terraform apply -replace=aws_instance.app`) deletes
-the root disk, including `~/app/data`. The Elastic IP stays; clear the old
-host key with `ssh-keygen -R <IP>`. Tear down with `terraform destroy` in
-`infra/aws/`.
+Afterwards every push to `master` re-applies and redeploys; PRs touching
+`infra/aws` get a plan comment. Tear down with Run workflow → `destroy`
+(type `jobspy-lite` to confirm); that deletes `~/app/data` with the instance.
 
 ---
 
